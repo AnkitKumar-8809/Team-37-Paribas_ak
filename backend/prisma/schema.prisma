@@ -1,0 +1,81 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum FileStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  QUARANTINED
+}
+
+enum ResolutionStatus {
+  PENDING
+  RESOLVED
+  DISCARDED
+}
+
+model FileRecord {
+  id            String          @id @default(uuid())
+  filename      String
+  originalName  String
+  status        FileStatus      @default(QUEUED)
+  progress      Float           @default(0)
+  totalRows     Int             @default(0)
+  processedRows Int             @default(0)
+  errorCount    Int             @default(0)
+  checksum      String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  rejections    FileRejection[]
+  anomalies     AnomalyAlert[]
+
+  @@map("file_records")
+}
+
+model FileRejection {
+  id          String           @id @default(uuid())
+  fileId      String
+  file        FileRecord       @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  rowNumber   Int
+  rawData     String
+  reason      String
+  status      ResolutionStatus @default(PENDING)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  resolutions Resolution[]
+
+  @@map("file_rejections")
+}
+
+model AnomalyAlert {
+  id          String     @id @default(uuid())
+  fileId      String
+  file        FileRecord @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  anomalyType String
+  score       Float      @default(0.0)
+  details     String
+  status      String     @default("OPEN")
+  createdAt   DateTime   @default(now())
+
+  @@map("anomaly_alerts")
+}
+
+model Resolution {
+  id            String        @id @default(uuid())
+  rejectionId   String
+  rejection     FileRejection @relation(fields: [rejectionId], references: [id], onDelete: Cascade)
+  resolvedBy    String        @default("system")
+  action        String
+  correctedData String?
+  notes         String?
+  createdAt     DateTime      @default(now())
+
+  @@map("resolutions")
+}

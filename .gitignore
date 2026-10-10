@@ -1,0 +1,47 @@
+# Node dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Production builds
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# File storage and queues
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/quarantine/*
+!backend/quarantine/.gitkeep
+backend/processed/*
+!backend/processed/.gitkeep
+
+# Logs and runtime
+*.log
+logs/
+
+# OS metadata
+.DS_Store
+Thumbs.db
