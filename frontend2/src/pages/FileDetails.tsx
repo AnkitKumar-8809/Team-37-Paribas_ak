@@ -1,3 +1,7 @@
+import {
+  useEffect,
+  useState,
+} from "react";
 
 import {
   ArrowLeft,
@@ -6,145 +10,797 @@ import {
   CheckCircle2,
   AlertTriangle,
   Database,
+  Activity,
+  CircleX,
+  RefreshCw,
 } from "lucide-react";
+
+import {
+  getFiles,
+  getFileDetails,
+} from "../services/fileDetailsApi";
 
 interface FileDetailsProps {
   onBack: () => void;
 }
 
-const fileDetails = {
-  fileName: "customer_transactions_001.csv",
-  fileId: "FILE-2026-001",
-  fileType: "CSV",
-  fileSize: "24.8 MB",
-  uploadedAt: "10 Oct 2026, 10:30 AM",
-  startedAt: "10 Oct 2026, 10:31 AM",
-  completedAt: "10 Oct 2026, 10:34 AM",
-  status: "Completed",
-  progress: 100,
-  totalRecords: 125000,
-  processedRecords: 125000,
-  failedRecords: 12,
-  processingTime: "2 min 48 sec",
-};
+interface ProcessingFile {
+  id: string;
+  fileName: string;
+  originalName?: string | null;
+  fileType: string;
+  status: string;
 
-function FileDetails({ onBack }: FileDetailsProps) {
-  const file = fileDetails;
+  sizeBytes: string;
+
+  progress: number;
+
+  recordCount?: number | null;
+  totalRows: number;
+  processedRows: number;
+  successfulRows: number;
+  failedRows: number;
+
+  predictedDurationMs?: number | null;
+  actualDurationMs?: number | null;
+
+  errorMessage?: string | null;
+
+  receivedAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+
+  faultLogs?: Array<{
+    id: string;
+    rowNumber: number;
+    columnName: string;
+    cellValue?: string | null;
+    errorMessage: string;
+    errorType?: string | null;
+    status: string;
+  }>;
+
+  anomalies?: Array<{
+    id: string;
+    rowNumber?: number | null;
+    anomalyType: string;
+    description?: string | null;
+    score?: number | null;
+  }>;
+
+  _count?: {
+    accounts: number;
+    bankTransactions: number;
+    payments: number;
+    rates: number;
+  };
+}
+
+function formatSize(bytes: string | number) {
+  const value = Number(bytes || 0);
+
+  if (value >= 1024 * 1024) {
+    return `${(
+      value /
+      (1024 * 1024)
+    ).toFixed(2)} MB`;
+  }
+
+  if (value >= 1024) {
+    return `${(
+      value / 1024
+    ).toFixed(2)} KB`;
+  }
+
+  return `${value} B`;
+}
+
+function formatDate(
+  value?: string | null
+) {
+  if (!value) {
+    return "—";
+  }
+
+  return new Date(value).toLocaleString();
+}
+
+function formatDuration(
+  ms?: number | null
+) {
+  if (!ms) {
+    return "—";
+  }
+
+  const seconds =
+    Math.round(ms / 1000);
+
+  if (seconds < 60) {
+    return `${seconds} sec`;
+  }
+
+  const minutes =
+    Math.floor(seconds / 60);
+
+  const remainingSeconds =
+    seconds % 60;
+
+  return `${minutes} min ${remainingSeconds} sec`;
+}
+
+function displayStatus(status: string) {
+  switch (status) {
+    case "COMPLETED":
+      return "Completed";
+
+    case "PROCESSING":
+      return "Processing";
+
+    case "QUEUED":
+      return "Queued";
+
+    case "FAILED":
+      return "Failed";
+
+    case "NEEDS_REVIEW":
+      return "Needs Review";
+
+    default:
+      return status;
+  }
+}
+
+function statusClass(status: string) {
+  switch (status) {
+    case "COMPLETED":
+      return "completed";
+
+    case "PROCESSING":
+      return "processing";
+
+    case "FAILED":
+      return "failed";
+
+    case "QUEUED":
+      return "queued";
+
+    case "NEEDS_REVIEW":
+      return "queued";
+
+    default:
+      return "queued";
+  }
+}
+
+function FileDetails({
+  onBack,
+}: FileDetailsProps) {
+  const [files, setFiles] = useState<
+    ProcessingFile[]
+  >([]);
+
+  const [
+    selectedFileId,
+    setSelectedFileId,
+  ] = useState("");
+
+  const [file, setFile] =
+    useState<ProcessingFile | null>(
+      null
+    );
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [error, setError] =
+    useState("");
+
+  // -----------------------------------
+  // Load available files
+  // -----------------------------------
+
+  async function loadFiles() {
+    try {
+      const data =
+        await getFiles();
+
+      setFiles(data);
+
+      if (
+        !selectedFileId &&
+        data.length > 0
+      ) {
+        setSelectedFileId(
+          data[0].id
+        );
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load files"
+      );
+    }
+  }
+
+  // -----------------------------------
+  // Load selected file details
+  // -----------------------------------
+
+  async function loadSelectedFile(
+    silent = false
+  ) {
+    if (!selectedFileId) {
+      return;
+    }
+
+    try {
+      if (!silent) {
+        setLoading(true);
+      }
+
+      const data =
+        await getFileDetails(
+          selectedFileId
+        );
+
+      setFile(data);
+      setError("");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load file details"
+      );
+    } finally {
+      if (!silent) {
+        setLoading(false);
+      }
+    }
+  }
+
+  // Initial file list
+  useEffect(() => {
+    loadFiles();
+  }, []);
+
+  // Load file + keep progress updated
+  useEffect(() => {
+    if (!selectedFileId) {
+      return;
+    }
+
+    loadSelectedFile();
+
+    const interval =
+      setInterval(() => {
+        loadSelectedFile(true);
+      }, 2000);
+
+    return () =>
+      clearInterval(interval);
+  }, [selectedFileId]);
+
+  if (
+    !loading &&
+    files.length === 0
+  ) {
+    return (
+      <div className="file-details-page">
+        <div className="page-heading">
+          <button
+            className="secondary-button"
+            onClick={onBack}
+          >
+            <ArrowLeft size={16} />
+            Back to Dashboard
+          </button>
+
+          <h1>File Details</h1>
+
+          <p>
+            No files have been processed yet.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="file-details-page">
+
       <div className="page-heading">
-        <button className="secondary-button" onClick={onBack}>
+
+        <button
+          className="secondary-button"
+          onClick={onBack}
+        >
           <ArrowLeft size={16} />
           Back to Dashboard
         </button>
 
         <h1>File Details</h1>
-        <p>View processing information and record-level results.</p>
-      </div>
-
-      <section className="details-file-card">
-        <div className="details-file-icon">
-          <FileText size={26} />
-        </div>
-
-        <div className="details-file-name">
-          <h2>{file.fileName}</h2>
-          <p>{file.fileId}</p>
-        </div>
-
-        <span className="status-badge status-completed">
-          <CheckCircle2 size={14} />
-          {file.status}
-        </span>
-      </section>
-
-      <section className="details-grid">
-        <div className="details-card">
-          <span>File Size</span>
-          <strong>{file.fileSize}</strong>
-        </div>
-
-        <div className="details-card">
-          <span>Total Records</span>
-          <strong>{file.totalRecords.toLocaleString()}</strong>
-        </div>
-
-        <div className="details-card">
-          <span>Processed Records</span>
-          <strong>{file.processedRecords.toLocaleString()}</strong>
-        </div>
-
-        <div className="details-card">
-          <span>Failed Records</span>
-          <strong>{file.failedRecords}</strong>
-        </div>
-      </section>
-
-      <section className="details-panel">
-        <h2>Processing Progress</h2>
-
-        <div className="details-progress-label">
-          <span>{file.progress}% complete</span>
-          <span>{file.processingTime}</span>
-        </div>
-
-        <div className="details-progress-track">
-          <div
-            className="details-progress-fill"
-            style={{ width: `${file.progress}%` }}
-          />
-        </div>
-      </section>
-
-      <section className="details-panel">
-        <h2>File Information</h2>
-
-        <div className="details-info-grid">
-          <div>
-            <span>File Type</span>
-            <strong>{file.fileType}</strong>
-          </div>
-
-          <div>
-            <span>
-              <Clock size={14} /> Uploaded At
-            </span>
-            <strong>{file.uploadedAt}</strong>
-          </div>
-
-          <div>
-            <span>
-              <Database size={14} /> Processing Started
-            </span>
-            <strong>{file.startedAt}</strong>
-          </div>
-
-          <div>
-            <span>
-              <CheckCircle2 size={14} /> Processing Completed
-            </span>
-            <strong>{file.completedAt}</strong>
-          </div>
-        </div>
-      </section>
-
-      <section className="details-panel">
-        <div className="details-section-heading">
-          <h2>Processing Summary</h2>
-          <AlertTriangle size={20} />
-        </div>
 
         <p>
-          The file has finished processing. Twelve records were flagged for
-          review. These values are sample data for the frontend prototype.
+          View live processing information,
+          validation failures and anomalies.
         </p>
 
-        <div className="details-note">
-          Record-level validation results and rejection reasons will be
-          connected when the backend is implemented.
-        </div>
-      </section>
+      </div>
+
+      {/* File selector */}
+      <div className="file-filters">
+
+        <select
+          value={selectedFileId}
+          onChange={(event) =>
+            setSelectedFileId(
+              event.target.value
+            )
+          }
+        >
+          {files.map((item) => (
+            <option
+              key={item.id}
+              value={item.id}
+            >
+              {item.originalName ||
+                item.fileName}
+            </option>
+          ))}
+        </select>
+
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() =>
+            loadSelectedFile()
+          }
+        >
+          <RefreshCw size={15} />
+          Refresh
+        </button>
+
+      </div>
+
+      {error && (
+        <section className="details-panel">
+          <p>
+            <AlertTriangle
+              size={16}
+            />{" "}
+            {error}
+          </p>
+        </section>
+      )}
+
+      {loading && !file && (
+        <section className="details-panel">
+
+          <p>
+            <Activity
+              size={16}
+            />{" "}
+            Loading file details...
+          </p>
+
+        </section>
+      )}
+
+      {file && (
+        <>
+
+          {/* Main file card */}
+          <section className="details-file-card">
+
+            <div className="details-file-icon">
+              <FileText size={26} />
+            </div>
+
+            <div className="details-file-name">
+
+              <h2>
+                {file.originalName ||
+                  file.fileName}
+              </h2>
+
+              <p>{file.id}</p>
+
+            </div>
+
+            <span
+              className={`status-badge ${statusClass(
+                file.status
+              )}`}
+            >
+
+              {file.status ===
+              "COMPLETED" ? (
+                <CheckCircle2
+                  size={14}
+                />
+              ) : file.status ===
+                "FAILED" ? (
+                <CircleX size={14} />
+              ) : file.status ===
+                "PROCESSING" ? (
+                <Activity size={14} />
+              ) : (
+                <Clock size={14} />
+              )}
+
+              {displayStatus(
+                file.status
+              )}
+
+            </span>
+
+          </section>
+
+          {/* Metrics */}
+          <section className="details-grid">
+
+            <div className="details-card">
+              <span>
+                File Size
+              </span>
+
+              <strong>
+                {formatSize(
+                  file.sizeBytes
+                )}
+              </strong>
+            </div>
+
+            <div className="details-card">
+              <span>
+                Total Records
+              </span>
+
+              <strong>
+                {(
+                  file.recordCount ??
+                  file.totalRows ??
+                  0
+                ).toLocaleString()}
+              </strong>
+            </div>
+
+            <div className="details-card">
+              <span>
+                Processed Records
+              </span>
+
+              <strong>
+                {file.processedRows.toLocaleString()}
+              </strong>
+            </div>
+
+            <div className="details-card">
+              <span>
+                Failed Records
+              </span>
+
+              <strong>
+                {file.failedRows.toLocaleString()}
+              </strong>
+            </div>
+
+          </section>
+
+          {/* Progress */}
+          <section className="details-panel">
+
+            <h2>
+              Processing Progress
+            </h2>
+
+            <div className="details-progress-label">
+
+              <span>
+                {Math.round(
+                  file.progress
+                )}
+                % complete
+              </span>
+
+              <span>
+                {formatDuration(
+                  file.actualDurationMs
+                )}
+              </span>
+
+            </div>
+
+            <div className="details-progress-track">
+
+              <div
+                className="details-progress-fill"
+                style={{
+                  width: `${Math.min(
+                    file.progress,
+                    100
+                  )}%`,
+                }}
+              />
+
+            </div>
+
+          </section>
+
+          {/* File info */}
+          <section className="details-panel">
+
+            <h2>
+              File Information
+            </h2>
+
+            <div className="details-info-grid">
+
+              <div>
+                <span>
+                  File Type
+                </span>
+
+                <strong>
+                  {file.fileType}
+                </strong>
+              </div>
+
+              <div>
+                <span>
+                  <Clock size={14} />
+                  Uploaded At
+                </span>
+
+                <strong>
+                  {formatDate(
+                    file.receivedAt
+                  )}
+                </strong>
+              </div>
+
+              <div>
+                <span>
+                  <Database
+                    size={14}
+                  />
+                  Processing Started
+                </span>
+
+                <strong>
+                  {formatDate(
+                    file.startedAt
+                  )}
+                </strong>
+              </div>
+
+              <div>
+                <span>
+                  <CheckCircle2
+                    size={14}
+                  />
+                  Processing Completed
+                </span>
+
+                <strong>
+                  {formatDate(
+                    file.completedAt
+                  )}
+                </strong>
+              </div>
+
+            </div>
+
+          </section>
+
+          {/* Processing summary */}
+          <section className="details-panel">
+
+            <div className="details-section-heading">
+
+              <h2>
+                Processing Summary
+              </h2>
+
+              <AlertTriangle
+                size={20}
+              />
+
+            </div>
+
+            <p>
+              <strong>
+                {file.successfulRows}
+              </strong>{" "}
+              records processed successfully
+              and{" "}
+              <strong>
+                {file.failedRows}
+              </strong>{" "}
+              records failed validation.
+            </p>
+
+            <div className="details-note">
+
+              Status:{" "}
+              <strong>
+                {displayStatus(
+                  file.status
+                )}
+              </strong>
+
+              {" · "}
+
+              Anomalies:{" "}
+              <strong>
+                {file.anomalies
+                  ?.length ?? 0}
+              </strong>
+
+              {" · "}
+
+              Validation issues:{" "}
+              <strong>
+                {file.faultLogs
+                  ?.length ?? 0}
+              </strong>
+
+            </div>
+
+            {file.errorMessage && (
+              <div className="details-note">
+                Error:{" "}
+                {file.errorMessage}
+              </div>
+            )}
+
+          </section>
+
+          {/* Validation issues */}
+          {(file.faultLogs?.length ??
+            0) > 0 && (
+            <section className="details-panel">
+
+              <h2>
+                Validation Issues
+              </h2>
+
+              <div className="table-wrapper">
+
+                <table className="file-table">
+
+                  <thead>
+                    <tr>
+                      <th>Row</th>
+                      <th>Column</th>
+                      <th>Value</th>
+                      <th>Error</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+
+                    {file.faultLogs?.map(
+                      (fault) => (
+                        <tr
+                          key={
+                            fault.id
+                          }
+                        >
+
+                          <td>
+                            {
+                              fault.rowNumber
+                            }
+                          </td>
+
+                          <td>
+                            {
+                              fault.columnName
+                            }
+                          </td>
+
+                          <td>
+                            {fault.cellValue ||
+                              "—"}
+                          </td>
+
+                          <td>
+                            {
+                              fault.errorMessage
+                            }
+                          </td>
+
+                          <td>
+                            {
+                              fault.status
+                            }
+                          </td>
+
+                        </tr>
+                      )
+                    )}
+
+                  </tbody>
+
+                </table>
+
+              </div>
+
+            </section>
+          )}
+
+          {/* Anomalies */}
+          {(file.anomalies?.length ??
+            0) > 0 && (
+            <section className="details-panel">
+
+              <h2>
+                Detected Anomalies
+              </h2>
+
+              <div className="table-wrapper">
+
+                <table className="file-table">
+
+                  <thead>
+                    <tr>
+                      <th>Row</th>
+                      <th>Type</th>
+                      <th>Description</th>
+                      <th>Score</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+
+                    {file.anomalies?.map(
+                      (anomaly) => (
+                        <tr
+                          key={
+                            anomaly.id
+                          }
+                        >
+
+                          <td>
+                            {anomaly.rowNumber ??
+                              "—"}
+                          </td>
+
+                          <td>
+                            {
+                              anomaly.anomalyType
+                            }
+                          </td>
+
+                          <td>
+                            {anomaly.description ||
+                              "—"}
+                          </td>
+
+                          <td>
+                            {anomaly.score ??
+                              "—"}
+                          </td>
+
+                        </tr>
+                      )
+                    )}
+
+                  </tbody>
+
+                </table>
+
+              </div>
+
+            </section>
+          )}
+
+        </>
+      )}
+
     </div>
   );
 }

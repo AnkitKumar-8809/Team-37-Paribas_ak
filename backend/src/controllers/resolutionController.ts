@@ -8,6 +8,49 @@ import { logger } from '../utils/logger';
  *
  * Returns all validation issues waiting for manual review.
  */
+
+export const getRejections = async (
+  _req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const rejections =
+      await prisma.faultLog.findMany({
+        orderBy: {
+          createdAt: 'desc',
+        },
+
+        include: {
+          file: {
+            select: {
+              id: true,
+              fileName: true,
+              originalName: true,
+              fileType: true,
+              status: true,
+            },
+          },
+        },
+      });
+
+    res.status(200).json({
+      success: true,
+      data: rejections,
+    });
+  } catch (error) {
+    logger.error(
+      '[ResolutionController] getRejections error:',
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      message:
+        'Failed to fetch rejected records',
+    });
+  }
+};
+
 export const getPendingRejections = async (
   _req: Request,
   res: Response
