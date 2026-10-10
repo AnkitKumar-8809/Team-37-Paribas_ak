@@ -20,53 +20,87 @@ import {
   getFileDetails,
 } from "../services/fileDetailsApi";
 
+import AnomalyPanel, {
+  type AnomalyRecord,
+} from "../components/AnomalyPanel";
+
 interface FileDetailsProps {
   onBack: () => void;
 }
 
 interface ProcessingFile {
   id: string;
+
   fileName: string;
-  originalName?: string | null;
+
+  originalName?:
+    | string
+    | null;
+
   fileType: string;
+
   status: string;
 
   sizeBytes: string;
 
   progress: number;
 
-  recordCount?: number | null;
+  recordCount?:
+    | number
+    | null;
+
   totalRows: number;
+
   processedRows: number;
+
   successfulRows: number;
+
   failedRows: number;
 
-  predictedDurationMs?: number | null;
-  actualDurationMs?: number | null;
+  predictedDurationMs?:
+    | number
+    | null;
 
-  errorMessage?: string | null;
+  actualDurationMs?:
+    | number
+    | null;
+
+  errorMessage?:
+    | string
+    | null;
 
   receivedAt: string;
-  startedAt?: string | null;
-  completedAt?: string | null;
+
+  startedAt?:
+    | string
+    | null;
+
+  completedAt?:
+    | string
+    | null;
 
   faultLogs?: Array<{
     id: string;
+
     rowNumber: number;
+
     columnName: string;
-    cellValue?: string | null;
+
+    cellValue?:
+      | string
+      | null;
+
     errorMessage: string;
-    errorType?: string | null;
+
+    errorType?:
+      | string
+      | null;
+
     status: string;
   }>;
 
-  anomalies?: Array<{
-    id: string;
-    rowNumber?: number | null;
-    anomalyType: string;
-    description?: string | null;
-    score?: number | null;
-  }>;
+  anomalies?:
+    AnomalyRecord[];
 
   _count?: {
     accounts: number;
@@ -76,17 +110,48 @@ interface ProcessingFile {
   };
 }
 
-function formatSize(bytes: string | number) {
-  const value = Number(bytes || 0);
+/* =========================================================
+   Format helpers
+   ========================================================= */
 
-  if (value >= 1024 * 1024) {
+function formatSize(
+  bytes:
+    | string
+    | number
+) {
+  const value =
+    Number(
+      bytes || 0
+    );
+
+  if (
+    value >=
+    1024 *
+      1024 *
+      1024
+  ) {
+    return `${(
+      value /
+      (1024 *
+        1024 *
+        1024)
+    ).toFixed(2)} GB`;
+  }
+
+  if (
+    value >=
+    1024 * 1024
+  ) {
     return `${(
       value /
       (1024 * 1024)
     ).toFixed(2)} MB`;
   }
 
-  if (value >= 1024) {
+  if (
+    value >=
+    1024
+  ) {
     return `${(
       value / 1024
     ).toFixed(2)} KB`;
@@ -96,31 +161,46 @@ function formatSize(bytes: string | number) {
 }
 
 function formatDate(
-  value?: string | null
+  value?:
+    | string
+    | null
 ) {
   if (!value) {
     return "—";
   }
 
-  return new Date(value).toLocaleString();
+  return new Date(
+    value
+  ).toLocaleString();
 }
 
 function formatDuration(
-  ms?: number | null
+  ms?:
+    | number
+    | null
 ) {
-  if (!ms) {
+  if (
+    !ms ||
+    ms <= 0
+  ) {
     return "—";
   }
 
   const seconds =
-    Math.round(ms / 1000);
+    Math.round(
+      ms / 1000
+    );
 
-  if (seconds < 60) {
+  if (
+    seconds < 60
+  ) {
     return `${seconds} sec`;
   }
 
   const minutes =
-    Math.floor(seconds / 60);
+    Math.floor(
+      seconds / 60
+    );
 
   const remainingSeconds =
     seconds % 60;
@@ -128,7 +208,9 @@ function formatDuration(
   return `${minutes} min ${remainingSeconds} sec`;
 }
 
-function displayStatus(status: string) {
+function displayStatus(
+  status: string
+) {
   switch (status) {
     case "COMPLETED":
       return "Completed";
@@ -150,7 +232,9 @@ function displayStatus(status: string) {
   }
 }
 
-function statusClass(status: string) {
+function statusClass(
+  status: string
+) {
   switch (status) {
     case "COMPLETED":
       return "completed";
@@ -172,43 +256,61 @@ function statusClass(status: string) {
   }
 }
 
+/* =========================================================
+   Component
+   ========================================================= */
+
 function FileDetails({
   onBack,
 }: FileDetailsProps) {
-  const [files, setFiles] = useState<
-    ProcessingFile[]
-  >([]);
+  const [
+    files,
+    setFiles,
+  ] =
+    useState<
+      ProcessingFile[]
+    >([]);
 
   const [
     selectedFileId,
     setSelectedFileId,
   ] = useState("");
 
-  const [file, setFile] =
-    useState<ProcessingFile | null>(
-      null
-    );
+  const [
+    file,
+    setFile,
+  ] =
+    useState<
+      ProcessingFile | null
+    >(null);
 
-  const [loading, setLoading] =
-    useState(true);
+  const [
+    loading,
+    setLoading,
+  ] = useState(true);
 
-  const [error, setError] =
-    useState("");
+  const [
+    error,
+    setError,
+  ] = useState("");
 
-  // -----------------------------------
-  // Load available files
-  // -----------------------------------
+  /* =======================================================
+     Load files
+     ======================================================= */
 
   async function loadFiles() {
     try {
       const data =
         await getFiles();
 
-      setFiles(data);
+      setFiles(
+        data
+      );
 
       if (
         !selectedFileId &&
-        data.length > 0
+        data.length >
+          0
       ) {
         setSelectedFileId(
           data[0].id
@@ -223,20 +325,24 @@ function FileDetails({
     }
   }
 
-  // -----------------------------------
-  // Load selected file details
-  // -----------------------------------
+  /* =======================================================
+     Load selected file
+     ======================================================= */
 
   async function loadSelectedFile(
     silent = false
   ) {
-    if (!selectedFileId) {
+    if (
+      !selectedFileId
+    ) {
       return;
     }
 
     try {
       if (!silent) {
-        setLoading(true);
+        setLoading(
+          true
+        );
       }
 
       const data =
@@ -244,7 +350,10 @@ function FileDetails({
           selectedFileId
         );
 
-      setFile(data);
+      setFile(
+        data
+      );
+
       setError("");
     } catch (err) {
       setError(
@@ -254,54 +363,86 @@ function FileDetails({
       );
     } finally {
       if (!silent) {
-        setLoading(false);
+        setLoading(
+          false
+        );
       }
     }
   }
 
-  // Initial file list
+  /* =======================================================
+     Effects
+     ======================================================= */
+
   useEffect(() => {
     loadFiles();
   }, []);
 
-  // Load file + keep progress updated
   useEffect(() => {
-    if (!selectedFileId) {
+    if (
+      !selectedFileId
+    ) {
       return;
     }
 
     loadSelectedFile();
 
     const interval =
-      setInterval(() => {
-        loadSelectedFile(true);
-      }, 2000);
+      window.setInterval(
+        () => {
+          loadSelectedFile(
+            true
+          );
+        },
+        2000
+      );
 
     return () =>
-      clearInterval(interval);
-  }, [selectedFileId]);
+      window.clearInterval(
+        interval
+      );
+  }, [
+    selectedFileId,
+  ]);
+
+  /* =======================================================
+     No files
+     ======================================================= */
 
   if (
     !loading &&
-    files.length === 0
+    files.length ===
+      0
   ) {
     return (
       <div className="file-details-page">
+
         <div className="page-heading">
+
           <button
             className="secondary-button"
-            onClick={onBack}
+            type="button"
+            onClick={
+              onBack
+            }
           >
-            <ArrowLeft size={16} />
+            <ArrowLeft
+              size={16}
+            />
             Back to Dashboard
           </button>
 
-          <h1>File Details</h1>
+          <h1>
+            File Details
+          </h1>
 
           <p>
-            No files have been processed yet.
+            No files have been
+            processed yet.
           </p>
+
         </div>
+
       </div>
     );
   }
@@ -309,45 +450,74 @@ function FileDetails({
   return (
     <div className="file-details-page">
 
+      {/* ===============================================
+          Heading
+          =============================================== */}
+
       <div className="page-heading">
 
         <button
           className="secondary-button"
-          onClick={onBack}
+          type="button"
+          onClick={
+            onBack
+          }
         >
-          <ArrowLeft size={16} />
+          <ArrowLeft
+            size={16}
+          />
           Back to Dashboard
         </button>
 
-        <h1>File Details</h1>
+        <h1>
+          File Details
+        </h1>
 
         <p>
-          View live processing information,
-          validation failures and anomalies.
+          View live processing
+          information, validation
+          failures and Layer 2 ML
+          anomalies.
         </p>
 
       </div>
 
-      {/* File selector */}
+      {/* ===============================================
+          Selector
+          =============================================== */}
+
       <div className="file-filters">
 
         <select
-          value={selectedFileId}
-          onChange={(event) =>
+          value={
+            selectedFileId
+          }
+          onChange={(
+            event
+          ) =>
             setSelectedFileId(
-              event.target.value
+              event.target
+                .value
             )
           }
         >
-          {files.map((item) => (
-            <option
-              key={item.id}
-              value={item.id}
-            >
-              {item.originalName ||
-                item.fileName}
-            </option>
-          ))}
+          {files.map(
+            (
+              item
+            ) => (
+              <option
+                key={
+                  item.id
+                }
+                value={
+                  item.id
+                }
+              >
+                {item.originalName ||
+                  item.fileName}
+              </option>
+            )
+          )}
         </select>
 
         <button
@@ -357,44 +527,67 @@ function FileDetails({
             loadSelectedFile()
           }
         >
-          <RefreshCw size={15} />
+          <RefreshCw
+            size={15}
+          />
           Refresh
         </button>
 
       </div>
 
+      {/* ===============================================
+          Errors
+          =============================================== */}
+
       {error && (
         <section className="details-panel">
+
           <p>
             <AlertTriangle
               size={16}
             />{" "}
             {error}
           </p>
-        </section>
-      )}
-
-      {loading && !file && (
-        <section className="details-panel">
-
-          <p>
-            <Activity
-              size={16}
-            />{" "}
-            Loading file details...
-          </p>
 
         </section>
       )}
+
+      {/* ===============================================
+          Loading
+          =============================================== */}
+
+      {loading &&
+        !file && (
+          <section className="details-panel">
+
+            <p>
+              <Activity
+                size={16}
+              />{" "}
+              Loading file
+              details...
+            </p>
+
+          </section>
+        )}
+
+      {/* ===============================================
+          File
+          =============================================== */}
 
       {file && (
         <>
 
           {/* Main file card */}
+
           <section className="details-file-card">
 
             <div className="details-file-icon">
-              <FileText size={26} />
+
+              <FileText
+                size={26}
+              />
+
             </div>
 
             <div className="details-file-name">
@@ -404,7 +597,9 @@ function FileDetails({
                   file.fileName}
               </h2>
 
-              <p>{file.id}</p>
+              <p>
+                {file.id}
+              </p>
 
             </div>
 
@@ -417,16 +612,30 @@ function FileDetails({
               {file.status ===
               "COMPLETED" ? (
                 <CheckCircle2
-                  size={14}
+                  size={
+                    14
+                  }
                 />
               ) : file.status ===
                 "FAILED" ? (
-                <CircleX size={14} />
+                <CircleX
+                  size={
+                    14
+                  }
+                />
               ) : file.status ===
                 "PROCESSING" ? (
-                <Activity size={14} />
+                <Activity
+                  size={
+                    14
+                  }
+                />
               ) : (
-                <Clock size={14} />
+                <Clock
+                  size={
+                    14
+                  }
+                />
               )}
 
               {displayStatus(
@@ -437,10 +646,14 @@ function FileDetails({
 
           </section>
 
-          {/* Metrics */}
+          {/* =============================================
+              Metrics
+              ============================================= */}
+
           <section className="details-grid">
 
             <div className="details-card">
+
               <span>
                 File Size
               </span>
@@ -450,9 +663,11 @@ function FileDetails({
                   file.sizeBytes
                 )}
               </strong>
+
             </div>
 
             <div className="details-card">
+
               <span>
                 Total Records
               </span>
@@ -464,9 +679,11 @@ function FileDetails({
                   0
                 ).toLocaleString()}
               </strong>
+
             </div>
 
             <div className="details-card">
+
               <span>
                 Processed Records
               </span>
@@ -474,9 +691,11 @@ function FileDetails({
               <strong>
                 {file.processedRows.toLocaleString()}
               </strong>
+
             </div>
 
             <div className="details-card">
+
               <span>
                 Failed Records
               </span>
@@ -484,11 +703,15 @@ function FileDetails({
               <strong>
                 {file.failedRows.toLocaleString()}
               </strong>
+
             </div>
 
           </section>
 
-          {/* Progress */}
+          {/* =============================================
+              Progress
+              ============================================= */}
+
           <section className="details-panel">
 
             <h2>
@@ -528,7 +751,10 @@ function FileDetails({
 
           </section>
 
-          {/* File info */}
+          {/* =============================================
+              File info
+              ============================================= */}
+
           <section className="details-panel">
 
             <h2>
@@ -538,18 +764,27 @@ function FileDetails({
             <div className="details-info-grid">
 
               <div>
+
                 <span>
                   File Type
                 </span>
 
                 <strong>
-                  {file.fileType}
+                  {
+                    file.fileType
+                  }
                 </strong>
+
               </div>
 
               <div>
+
                 <span>
-                  <Clock size={14} />
+                  <Clock
+                    size={
+                      14
+                    }
+                  />
                   Uploaded At
                 </span>
 
@@ -558,12 +793,16 @@ function FileDetails({
                     file.receivedAt
                   )}
                 </strong>
+
               </div>
 
               <div>
+
                 <span>
                   <Database
-                    size={14}
+                    size={
+                      14
+                    }
                   />
                   Processing Started
                 </span>
@@ -573,12 +812,16 @@ function FileDetails({
                     file.startedAt
                   )}
                 </strong>
+
               </div>
 
               <div>
+
                 <span>
                   <CheckCircle2
-                    size={14}
+                    size={
+                      14
+                    }
                   />
                   Processing Completed
                 </span>
@@ -588,13 +831,17 @@ function FileDetails({
                     file.completedAt
                   )}
                 </strong>
+
               </div>
 
             </div>
 
           </section>
 
-          {/* Processing summary */}
+          {/* =============================================
+              Summary
+              ============================================= */}
+
           <section className="details-panel">
 
             <div className="details-section-heading">
@@ -611,19 +858,25 @@ function FileDetails({
 
             <p>
               <strong>
-                {file.successfulRows}
+                {
+                  file.successfulRows
+                }
               </strong>{" "}
-              records processed successfully
-              and{" "}
+              records passed Layer
+              1 validation and{" "}
               <strong>
-                {file.failedRows}
+                {
+                  file.failedRows
+                }
               </strong>{" "}
-              records failed validation.
+              records failed
+              validation.
             </p>
 
             <div className="details-note">
 
               Status:{" "}
+
               <strong>
                 {displayStatus(
                   file.status
@@ -632,39 +885,59 @@ function FileDetails({
 
               {" · "}
 
-              Anomalies:{" "}
+              ML anomalies:{" "}
+
               <strong>
                 {file.anomalies
-                  ?.length ?? 0}
+                  ?.length ??
+                  0}
               </strong>
 
               {" · "}
 
               Validation issues:{" "}
+
               <strong>
                 {file.faultLogs
-                  ?.length ?? 0}
+                  ?.length ??
+                  0}
               </strong>
 
             </div>
 
             {file.errorMessage && (
               <div className="details-note">
+
                 Error:{" "}
-                {file.errorMessage}
+
+                {
+                  file.errorMessage
+                }
+
               </div>
             )}
 
           </section>
 
-          {/* Validation issues */}
-          {(file.faultLogs?.length ??
-            0) > 0 && (
+          {/* =============================================
+              Layer 1 validation failures
+              ============================================= */}
+
+          {(file.faultLogs
+            ?.length ??
+            0) >
+            0 && (
             <section className="details-panel">
 
               <h2>
                 Validation Issues
               </h2>
+
+              <p>
+                Records rejected
+                during deterministic
+                Layer 1 validation.
+              </p>
 
               <div className="table-wrapper">
 
@@ -672,18 +945,36 @@ function FileDetails({
 
                   <thead>
                     <tr>
-                      <th>Row</th>
-                      <th>Column</th>
-                      <th>Value</th>
-                      <th>Error</th>
-                      <th>Status</th>
+
+                      <th>
+                        Row
+                      </th>
+
+                      <th>
+                        Column
+                      </th>
+
+                      <th>
+                        Value
+                      </th>
+
+                      <th>
+                        Error
+                      </th>
+
+                      <th>
+                        Status
+                      </th>
+
                     </tr>
                   </thead>
 
                   <tbody>
 
                     {file.faultLogs?.map(
-                      (fault) => (
+                      (
+                        fault
+                      ) => (
                         <tr
                           key={
                             fault.id
@@ -732,71 +1023,16 @@ function FileDetails({
             </section>
           )}
 
-          {/* Anomalies */}
-          {(file.anomalies?.length ??
-            0) > 0 && (
-            <section className="details-panel">
+          {/* =============================================
+              Layer 2 ML anomalies
+              ============================================= */}
 
-              <h2>
-                Detected Anomalies
-              </h2>
-
-              <div className="table-wrapper">
-
-                <table className="file-table">
-
-                  <thead>
-                    <tr>
-                      <th>Row</th>
-                      <th>Type</th>
-                      <th>Description</th>
-                      <th>Score</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-
-                    {file.anomalies?.map(
-                      (anomaly) => (
-                        <tr
-                          key={
-                            anomaly.id
-                          }
-                        >
-
-                          <td>
-                            {anomaly.rowNumber ??
-                              "—"}
-                          </td>
-
-                          <td>
-                            {
-                              anomaly.anomalyType
-                            }
-                          </td>
-
-                          <td>
-                            {anomaly.description ||
-                              "—"}
-                          </td>
-
-                          <td>
-                            {anomaly.score ??
-                              "—"}
-                          </td>
-
-                        </tr>
-                      )
-                    )}
-
-                  </tbody>
-
-                </table>
-
-              </div>
-
-            </section>
-          )}
+          <AnomalyPanel
+            anomalies={
+              file.anomalies ??
+              []
+            }
+          />
 
         </>
       )}

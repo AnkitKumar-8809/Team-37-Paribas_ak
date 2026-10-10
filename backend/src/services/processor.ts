@@ -1,16 +1,34 @@
 import fs from 'fs';
 import csv from 'csv-parser';
-import { Prisma } from '@prisma/client';
+
+import {
+  Prisma,
+  FileType,
+} from '@prisma/client';
 
 import { prisma } from '../db/prisma';
 import { logger } from '../utils/logger';
-import { emitFileProgress } from '../sockets/socket';
 
-import { validatorService } from './validator';
-import { loaderService } from './loader';
-import { mlClient } from './mlClient';
+import {
+  emitFileProgress,
+} from '../sockets/socket';
 
-type CsvRecord = Record<string, string>;
+import {
+  validatorService,
+} from './validator';
+
+import {
+  loaderService,
+} from './loader';
+
+import {
+  mlClient,
+  type AnomalyFlag,
+  type FileAnomalyFeatures,
+} from './mlClient';
+
+type CsvRecord =
+  Record<string, string>;
 
 interface ProcessingStats {
   processedRows: number;
@@ -20,55 +38,95 @@ interface ProcessingStats {
 }
 
 export class ProcessorService {
-  private readonly batchSize = 500;
+  private readonly batchSize =
+    500;
 
-  /**
-   * Main processing entry point.
-   *
-   * QUEUED
-   *   ↓
-   * PROCESSING
-   *   ↓
-   * COMPLETED / NEEDS_REVIEW / FAILED
-   */
+  /* =======================================================
+     MAIN PROCESSING ENTRY
+     ======================================================= */
+
   async processFile(
     fileId: string,
     filePath: string,
     _totalRows?: number
   ): Promise<void> {
-    const startedAt = new Date();
+    const startedAt =
+      new Date();
 
     logger.info(
-      `[ProcessorService] Starting processing | fileId=${fileId}`
+      `[ProcessorService] Starting processing | file=${fileId}`
     );
 
     try {
-      if (!fs.existsSync(filePath)) {
-        throw new Error(`File not found: ${filePath}`);
+      if (
+        !fs.existsSync(
+          filePath
+        )
+      ) {
+        throw new Error(
+          `File not found: ${filePath}`
+        );
       }
 
+      /* ---------------------------------------------------
+         Read file information from PostgreSQL
+         --------------------------------------------------- */
+
+      const fileRecord =
+        await prisma.processingFile.findUnique({
+          where: {
+            id: fileId,
+          },
+
+          select: {
+            fileType: true,
+            predictedDurationMs:
+              true,
+          },
+        });
+
+      if (!fileRecord) {
+        throw new Error(
+          `Processing file not found: ${fileId}`
+        );
+      }
+
+      const fileType =
+        fileRecord.fileType;
+
       const fileStats =
-        await fs.promises.stat(filePath);
+        await fs.promises.stat(
+          filePath
+        );
 
       const fileSizeBytes =
         fileStats.size;
 
-      // ------------------------------------------------
-      // Mark as PROCESSING
-      // ------------------------------------------------
+      /* ---------------------------------------------------
+         Mark PROCESSING
+         --------------------------------------------------- */
 
       await prisma.processingFile.update({
         where: {
           id: fileId,
         },
+
         data: {
-          status: 'PROCESSING',
+          status:
+            'PROCESSING',
+
           startedAt,
+
           progress: 0,
+
           processedRows: 0,
+
           successfulRows: 0,
+
           failedRows: 0,
-          errorMessage: null,
+
+          errorMessage:
+            null,
         },
       });
 
@@ -84,16 +142,46 @@ export class ProcessorService {
         }
       );
 
-      // ------------------------------------------------
-      // Process CSV
-      // ------------------------------------------------
+      /* ---------------------------------------------------
+         Stream + validate + load + ML batch analysis
+         --------------------------------------------------- */
 
       const stats =
         await this.streamAndProcessFile(
           fileId,
+          fileType,
           filePath,
           fileSizeBytes
         );
+
+      /* ===================================================
+         FILE-WIDE ML CHECKS
+         =================================================== */
+
+      /**
+       * Important:
+       *
+       * The Python service stores a session across
+       * batches so it can detect patterns such as:
+       *
+       * rapid transactions across different batches
+       * near duplicates
+       * rate-series anomalies
+       */
+      const finishResult =
+        await mlClient.finishAnomalyFile(
+          fileId
+        );
+
+      await this.saveAnomalyFlags(
+        fileId,
+        finishResult.flags,
+        stats
+      );
+
+      /* ---------------------------------------------------
+         Calculate real processing time
+         --------------------------------------------------- */
 
       const completedAt =
         new Date();
@@ -102,27 +190,155 @@ export class ProcessorService {
         completedAt.getTime() -
         startedAt.getTime();
 
+      /* ===================================================
+         FILE LEVEL ML CHECKS
+         =================================================== */
+
       /**
-       * If rejected rows exist,
-       * send file to Resolution Centre.
+       * Give the model historical files of the
+       * same type so it can identify unusual:
+       *
+       * file sizes
+       * row counts
+       * rejection rates
+       * processing times
+       */
+      const previousFiles =
+        await prisma.processingFile.findMany({
+          where: {
+            id: {
+              not: fileId,
+            },
+
+            fileType,
+
+            completedAt: {
+              not: null,
+            },
+          },
+
+          orderBy: {
+            completedAt:
+              'desc',
+          },
+
+          take: 50,
+
+          select: {
+            fileType: true,
+            sizeBytes: true,
+            totalRows: true,
+            failedRows: true,
+            actualDurationMs:
+              true,
+            predictedDurationMs:
+              true,
+          },
+        });
+
+      const history:
+        FileAnomalyFeatures[] =
+        previousFiles.map(
+          (previous) => ({
+            file_type:
+              previous.fileType,
+
+            size_bytes:
+              Number(
+                previous.sizeBytes
+              ),
+
+            total_records:
+              previous.totalRows,
+
+            rejected_records:
+              previous.failedRows,
+
+            actual_seconds:
+              previous.actualDurationMs !=
+              null
+                ? previous.actualDurationMs /
+                  1000
+                : undefined,
+
+            predicted_seconds:
+              previous.predictedDurationMs !=
+              null
+                ? previous.predictedDurationMs /
+                  1000
+                : undefined,
+          })
+        );
+
+      const currentFileFeatures:
+        FileAnomalyFeatures = {
+        file_type:
+          fileType,
+
+        size_bytes:
+          fileSizeBytes,
+
+        total_records:
+          stats.processedRows,
+
+        rejected_records:
+          stats.rejectedRows,
+
+        actual_seconds:
+          actualDurationMs /
+          1000,
+
+        predicted_seconds:
+          fileRecord.predictedDurationMs !=
+          null
+            ? fileRecord.predictedDurationMs /
+              1000
+            : undefined,
+      };
+
+      const fileLevelResult =
+        await mlClient.detectFileAnomalies(
+          currentFileFeatures,
+          history
+        );
+
+      await this.saveAnomalyFlags(
+        fileId,
+        fileLevelResult.flags,
+        stats
+      );
+
+      /* ===================================================
+         FINAL STATUS
+         =================================================== */
+
+      /**
+       * Anomalies do NOT reject files.
+       *
+       * Only Layer 1 validation failures move
+       * the file to NEEDS_REVIEW.
        */
       const finalStatus =
-        stats.rejectedRows > 0
+        stats.rejectedRows >
+        0
           ? 'NEEDS_REVIEW'
           : 'COMPLETED';
 
-      // ------------------------------------------------
-      // Save final result
-      // ------------------------------------------------
+      /* ---------------------------------------------------
+         Save final file result
+         --------------------------------------------------- */
 
       await prisma.processingFile.update({
         where: {
           id: fileId,
         },
-        data: {
-          status: finalStatus,
 
-          progress: 100,
+        data: {
+          status:
+            finalStatus,
+
+          progress:
+            100,
 
           recordCount:
             stats.processedRows,
@@ -143,7 +359,8 @@ export class ProcessorService {
 
           actualDurationMs,
 
-          errorMessage: null,
+          errorMessage:
+            null,
         },
       });
 
@@ -199,14 +416,22 @@ export class ProcessorService {
           where: {
             id: fileId,
           },
+
           data: {
-            status: 'FAILED',
+            status:
+              'FAILED',
+
             completedAt,
+
             actualDurationMs,
-            errorMessage: message,
+
+            errorMessage:
+              message,
           },
         });
-      } catch (databaseError) {
+      } catch (
+        databaseError
+      ) {
         logger.error(
           `[ProcessorService] Failed updating FAILED status | file=${fileId}`,
           databaseError
@@ -218,7 +443,8 @@ export class ProcessorService {
         0,
         'FAILED',
         {
-          error: message,
+          error:
+            message,
         }
       );
 
@@ -226,28 +452,35 @@ export class ProcessorService {
     }
   }
 
-  /**
-   * Streams CSV instead of loading the whole file into RAM.
-   */
+  /* =======================================================
+     STREAM FILE
+     ======================================================= */
+
   private async streamAndProcessFile(
     fileId: string,
+    fileType: FileType,
     filePath: string,
     fileSizeBytes: number
   ): Promise<ProcessingStats> {
     return new Promise(
-      (resolve, reject) => {
-        const stats: ProcessingStats = {
+      (
+        resolve,
+        reject
+      ) => {
+        const stats:
+          ProcessingStats = {
           processedRows: 0,
           validRows: 0,
           rejectedRows: 0,
           anomalyCount: 0,
         };
 
-        let batch: CsvRecord[] = [];
+        let batch:
+          CsvRecord[] = [];
 
         /**
-         * Makes sure batches from the same
-         * file are processed sequentially.
+         * Ensures batches from one file
+         * are processed sequentially.
          */
         let processing =
           Promise.resolve();
@@ -276,11 +509,14 @@ export class ProcessorService {
         csvStream.on(
           'data',
           (
-            record: CsvRecord
+            record:
+              CsvRecord
           ) => {
             csvStream.pause();
 
-            batch.push(record);
+            batch.push(
+              record
+            );
 
             if (
               batch.length >=
@@ -293,26 +529,33 @@ export class ProcessorService {
 
               processing =
                 processing
-                  .then(() =>
-                    this.processBatch(
-                      fileId,
-                      currentBatch,
-                      stats
-                    )
+                  .then(
+                    () =>
+                      this.processBatch(
+                        fileId,
+                        fileType,
+                        currentBatch,
+                        stats
+                      )
                   )
-                  .then(() =>
-                    this.updateProgress(
-                      fileId,
-                      fileStream.bytesRead,
-                      fileSizeBytes,
-                      stats
-                    )
+                  .then(
+                    () =>
+                      this.updateProgress(
+                        fileId,
+                        fileStream.bytesRead,
+                        fileSizeBytes,
+                        stats
+                      )
                   )
-                  .then(() => {
-                    csvStream.resume();
-                  })
+                  .then(
+                    () => {
+                      csvStream.resume();
+                    }
+                  )
                   .catch(
-                    (error) => {
+                    (
+                      error
+                    ) => {
                       csvStream.destroy(
                         error
                       );
@@ -328,28 +571,35 @@ export class ProcessorService {
           'end',
           () => {
             processing
-              .then(async () => {
-                if (
-                  batch.length >
-                  0
-                ) {
-                  await this.processBatch(
-                    fileId,
-                    batch,
-                    stats
-                  );
+              .then(
+                async () => {
+                  if (
+                    batch.length >
+                    0
+                  ) {
+                    await this.processBatch(
+                      fileId,
+                      fileType,
+                      batch,
+                      stats
+                    );
 
-                  await this.updateProgress(
-                    fileId,
-                    fileSizeBytes,
-                    fileSizeBytes,
+                    await this.updateProgress(
+                      fileId,
+                      fileSizeBytes,
+                      fileSizeBytes,
+                      stats
+                    );
+                  }
+
+                  resolve(
                     stats
                   );
                 }
-
-                resolve(stats);
-              })
-              .catch(reject);
+              )
+              .catch(
+                reject
+              );
           }
         );
 
@@ -366,50 +616,70 @@ export class ProcessorService {
     );
   }
 
-  /**
-   * Process one batch of CSV records.
-   */
+  /* =======================================================
+     PROCESS ONE BATCH
+     ======================================================= */
+
   private async processBatch(
     fileId: string,
-    records: CsvRecord[],
-    stats: ProcessingStats
+    fileType: FileType,
+    records:
+      CsvRecord[],
+    stats:
+      ProcessingStats
   ): Promise<void> {
-    const validRecords: Array<
-      Record<string, unknown>
-    > = [];
+    const validRecords:
+      Array<
+        Record<
+          string,
+          unknown
+        >
+      > = [];
 
     /**
-     * Collect fault logs first,
-     * then insert them in one DB call.
+     * Real CSV row numbers for the
+     * valid rows sent to ML.
      */
-    const faultLogs: Prisma.FaultLogCreateManyInput[] =
+    const validRowNumbers:
+      number[] = [];
+
+    const faultLogs:
+      Prisma.FaultLogCreateManyInput[] =
       [];
 
-    for (const record of records) {
+    for (
+      const record of
+      records
+    ) {
       stats.processedRows++;
 
       /**
-       * +1 because CSV line 1 is header.
+       * CSV line 1 is header.
        *
-       * First data row = CSV line 2.
+       * First data row:
+       * processedRows=1
+       * rowNumber=2
        */
       const rowNumber =
-        stats.processedRows + 1;
+        stats.processedRows +
+        1;
 
-      // ----------------------------------------------
-      // Validate row
-      // ----------------------------------------------
+      /* ---------------------------------------------------
+         Layer 1 validation
+         --------------------------------------------------- */
 
       const validation =
         await validatorService.validateRecord(
           record
         );
 
-      // ----------------------------------------------
-      // Invalid row
-      // ----------------------------------------------
+      /* ---------------------------------------------------
+         INVALID ROW
+         --------------------------------------------------- */
 
-      if (!validation.isValid) {
+      if (
+        !validation.isValid
+      ) {
         stats.rejectedRows++;
 
         logger.debug(
@@ -421,15 +691,6 @@ export class ProcessorService {
             )}`
         );
 
-        /**
-         * One row may contain multiple problems.
-         *
-         * Example:
-         * bad IFSC + invalid currency
-         *
-         * Therefore we create one FaultLog
-         * per validation issue.
-         */
         for (
           const issue of
           validation.issues
@@ -453,90 +714,47 @@ export class ProcessorService {
               issue.errorType,
 
             rawRowData:
-              record as Prisma.InputJsonValue,
+              record as
+                Prisma.InputJsonValue,
 
             status:
               'PENDING',
           });
         }
 
+        /**
+         * Invalid rows are NOT sent
+         * to Layer 2 anomaly detection.
+         */
         continue;
       }
 
-      // ----------------------------------------------
-      // Valid row
-      // ----------------------------------------------
+      /* ---------------------------------------------------
+         VALID ROW
+         --------------------------------------------------- */
 
       stats.validRows++;
-
-      /**
-       * Sample every 100th valid row for
-       * ML anomaly checking.
-       */
-      if (
-        stats.validRows %
-          100 ===
-        0
-      ) {
-        try {
-          const anomaly =
-            await mlClient.checkAnomaly(
-              fileId,
-              record
-            );
-
-          if (
-            anomaly.isAnomaly
-          ) {
-            stats.anomalyCount++;
-
-            await prisma.anomaly.create({
-              data: {
-                fileId,
-
-                rowNumber,
-
-                anomalyType:
-                  'ML_DETECTED',
-
-                description:
-                  'Potential anomaly detected by ML service',
-
-                details:
-                  record as Prisma.InputJsonValue,
-              },
-            });
-
-            logger.info(
-              `[ProcessorService] Anomaly detected | file=${fileId} | row=${rowNumber}`
-            );
-          }
-        } catch (error) {
-          /**
-           * ML failure should NOT stop
-           * core file processing.
-           */
-          logger.warn(
-            `[ProcessorService] ML anomaly check failed | file=${fileId} | row=${rowNumber}`
-          );
-        }
-      }
 
       validRecords.push(
         record
       );
+
+      validRowNumbers.push(
+        rowNumber
+      );
     }
 
-    // ------------------------------------------------
-    // Save rejected rows
-    // ------------------------------------------------
+    /* ===================================================
+       SAVE VALIDATION FAILURES
+       =================================================== */
 
     if (
       faultLogs.length >
       0
     ) {
       await prisma.faultLog.createMany({
-        data: faultLogs,
+        data:
+          faultLogs,
       });
 
       logger.info(
@@ -544,9 +762,9 @@ export class ProcessorService {
       );
     }
 
-    // ------------------------------------------------
-    // Save valid records
-    // ------------------------------------------------
+    /* ===================================================
+       LOAD VALID RECORDS
+       =================================================== */
 
     if (
       validRecords.length >
@@ -557,20 +775,110 @@ export class ProcessorService {
         validRecords
       );
     }
+
+    /* ===================================================
+       LAYER 2 ML ANOMALY DETECTION
+       =================================================== */
+
+    if (
+      validRecords.length >
+      0
+    ) {
+      const anomalyResult =
+        await mlClient.detectAnomalyBatch(
+          fileId,
+          fileType,
+          validRecords,
+          validRowNumbers
+        );
+
+      await this.saveAnomalyFlags(
+        fileId,
+        anomalyResult.flags,
+        stats
+      );
+    }
   }
 
-  /**
-   * Save progress to DB and push it through Socket.IO.
-   */
+  /* =======================================================
+     SAVE ML ANOMALIES TO PRISMA
+     ======================================================= */
+
+  private async saveAnomalyFlags(
+    fileId: string,
+    flags:
+      AnomalyFlag[],
+    stats:
+      ProcessingStats
+  ): Promise<void> {
+    if (
+      flags.length ===
+      0
+    ) {
+      return;
+    }
+
+    await prisma.anomaly.createMany({
+      data:
+        flags.map(
+          (
+            flag
+          ) => ({
+            fileId,
+
+            rowNumber:
+              flag.row_number ??
+              null,
+
+            anomalyType:
+              flag.anomaly_type,
+
+            description:
+              flag.explanation,
+
+            score:
+              flag.score,
+
+            details: {
+              rule_ref:
+                flag.rule_ref,
+
+              method:
+                flag.method,
+
+              level:
+                flag.level,
+            } as
+              Prisma.InputJsonValue,
+          })
+        ),
+    });
+
+    stats.anomalyCount +=
+      flags.length;
+
+    logger.info(
+      `[ProcessorService] Saved ${flags.length} ML anomaly flags | file=${fileId}`
+    );
+  }
+
+  /* =======================================================
+     PROGRESS
+     ======================================================= */
+
   private async updateProgress(
     fileId: string,
     bytesRead: number,
     totalBytes: number,
-    stats: ProcessingStats
+    stats:
+      ProcessingStats
   ): Promise<void> {
-    let progress = 0;
+    let progress =
+      0;
 
-    if (totalBytes > 0) {
+    if (
+      totalBytes > 0
+    ) {
       progress =
         Math.floor(
           (bytesRead /
@@ -580,8 +888,8 @@ export class ProcessorService {
     }
 
     /**
-     * 100% is reserved for
-     * successful final completion.
+     * 100 is reserved for
+     * final completion.
      */
     progress =
       Math.min(
@@ -593,6 +901,7 @@ export class ProcessorService {
       where: {
         id: fileId,
       },
+
       data: {
         progress,
 
