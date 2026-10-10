@@ -1,306 +1,917 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
-import { useState } from "react";
 import {
   ArrowLeft,
   WandSparkles,
   CheckCircle2,
   CircleX,
   Pencil,
-  RotateCcw,
+  RefreshCw,
   AlertTriangle,
+  Clock3,
 } from "lucide-react";
+
+import {
+  getResolutions,
+  resolveRecord,
+  type ResolutionRecord,
+} from "../services/resolutionApi";
 
 interface ResolutionCentreProps {
   onBack: () => void;
 }
 
-interface ResolutionRecord {
-  id: string;
-  file: string;
-  field: string;
-  originalValue: string;
-  suggestedValue: string;
-  reason: string;
-  confidence: number;
-  status: "Pending" | "Accepted" | "Rejected";
+function displayStatus(
+  status: ResolutionRecord["status"]
+) {
+  switch (status) {
+    case "PENDING":
+      return "Pending";
+
+    case "APPROVED":
+      return "Accepted";
+
+    case "EDITED":
+      return "Edited";
+
+    case "REJECTED":
+      return "Rejected";
+
+    case "SAVED_TO_TARGET":
+      return "Saved";
+
+    default:
+      return status;
+  }
 }
 
-const initialRecords: ResolutionRecord[] = [
-  {
-    id: "REC-10021",
-    file: "Customer_Update.csv",
-    field: "IFSC Code",
-    originalValue: "ABCD00012",
-    suggestedValue: "ABCD0000012",
-    reason: "The IFSC code appears to have an incorrect length.",
-    confidence: 94,
-    status: "Pending",
-  },
-  {
-    id: "REC-10022",
-    file: "Customer_Update.csv",
-    field: "Account Number",
-    originalValue: "12345",
-    suggestedValue: "0000012345",
-    reason: "The account number may require leading zeros.",
-    confidence: 87,
-    status: "Pending",
-  },
-  {
-    id: "REC-10023",
-    file: "Bank-Txns_001.csv",
-    field: "Transaction Amount",
-    originalValue: "-5000",
-    suggestedValue: "5000",
-    reason: "The amount is negative. Verify the transaction before changing it.",
-    confidence: 61,
-    status: "Pending",
-  },
-];
+function statusClass(
+  status: ResolutionRecord["status"]
+) {
+  switch (status) {
+    case "PENDING":
+      return "pending";
+
+    case "REJECTED":
+      return "rejected";
+
+    default:
+      return "reviewed";
+  }
+}
+
+function formatConfidence(
+  confidence?: number | null
+) {
+  if (
+    confidence === undefined ||
+    confidence === null
+  ) {
+    return null;
+  }
+
+  const percentage =
+    confidence <= 1
+      ? confidence * 100
+      : confidence;
+
+  return Math.round(
+    percentage
+  );
+}
 
 export default function ResolutionCentre({
   onBack,
 }: ResolutionCentreProps) {
-  const [records, setRecords] = useState(initialRecords);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editValue, setEditValue] = useState("");
-  const [message, setMessage] = useState("");
+  const [
+    records,
+    setRecords,
+  ] =
+    useState<
+      ResolutionRecord[]
+    >([]);
 
-  const pendingCount = records.filter(
-    (record) => record.status === "Pending"
-  ).length;
+  const [
+    loading,
+    setLoading,
+  ] = useState(true);
 
-  const updateStatus = (
-    id: string,
-    status: ResolutionRecord["status"]
-  ) => {
-    setRecords((current) =>
-      current.map((record) =>
-        record.id === id ? { ...record, status } : record
-      )
+  const [
+    error,
+    setError,
+  ] = useState("");
+
+  const [
+    message,
+    setMessage,
+  ] = useState("");
+
+  const [
+    editingId,
+    setEditingId,
+  ] =
+    useState<string | null>(
+      null
     );
 
-    setEditingId(null);
-    setMessage(`${id} marked as ${status.toLowerCase()}.`);
-  };
+  const [
+    editValue,
+    setEditValue,
+  ] = useState("");
 
-  const startEditing = (record: ResolutionRecord) => {
-    setEditingId(record.id);
-    setEditValue(record.suggestedValue);
+  const [
+    actionId,
+    setActionId,
+  ] =
+    useState<string | null>(
+      null
+    );
+
+  /* =========================================
+     Load backend records
+     ========================================= */
+
+  const loadRecords =
+    useCallback(
+      async (
+        silent = false
+      ) => {
+        try {
+          if (!silent) {
+            setLoading(true);
+          }
+
+          const data =
+            await getResolutions();
+
+          setRecords(data);
+
+          setError("");
+        } catch (err) {
+          console.error(
+            "Failed to load resolutions:",
+            err
+          );
+
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load resolution records"
+          );
+        } finally {
+          if (!silent) {
+            setLoading(false);
+          }
+        }
+      },
+      []
+    );
+
+  /* =========================================
+     Initial fetch + live refresh
+     ========================================= */
+
+  useEffect(() => {
+    loadRecords();
+
+    const interval =
+      window.setInterval(
+        () => {
+          loadRecords(true);
+        },
+        2000
+      );
+
+    return () =>
+      window.clearInterval(
+        interval
+      );
+  }, [loadRecords]);
+
+  /* =========================================
+     Counts
+     ========================================= */
+
+  const pendingCount =
+    useMemo(
+      () =>
+        records.filter(
+          (record) =>
+            record.status ===
+            "PENDING"
+        ).length,
+      [records]
+    );
+
+  const acceptedCount =
+    useMemo(
+      () =>
+        records.filter(
+          (record) =>
+            record.status ===
+              "APPROVED" ||
+            record.status ===
+              "EDITED" ||
+            record.status ===
+              "SAVED_TO_TARGET"
+        ).length,
+      [records]
+    );
+
+  const rejectedCount =
+    useMemo(
+      () =>
+        records.filter(
+          (record) =>
+            record.status ===
+            "REJECTED"
+        ).length,
+      [records]
+    );
+
+  /* =========================================
+     Edit
+     ========================================= */
+
+  const startEditing = (
+    record: ResolutionRecord
+  ) => {
+    setEditingId(
+      record.id
+    );
+
+    setEditValue(
+      record.aiSuggestion ||
+        record.cellValue ||
+        ""
+    );
+
     setMessage("");
   };
 
-  const saveEdit = (id: string) => {
-    if (!editValue.trim()) {
-      setMessage("Suggested value cannot be empty.");
+  const cancelEditing = () => {
+    setEditingId(null);
+    setEditValue("");
+  };
+
+  /* =========================================
+     Resolve helper
+     ========================================= */
+
+  const runResolution =
+    async (
+      record: ResolutionRecord,
+      action:
+        | "APPROVE"
+        | "EDIT"
+        | "REJECT",
+      correctedValue?: string
+    ) => {
+      try {
+        setActionId(
+          record.id
+        );
+
+        setError("");
+        setMessage("");
+
+        await resolveRecord(
+          record.id,
+          action,
+          correctedValue
+        );
+
+        setEditingId(null);
+        setEditValue("");
+
+        if (
+          action ===
+          "APPROVE"
+        ) {
+          setMessage(
+            `${record.id} accepted successfully.`
+          );
+        } else if (
+          action ===
+          "EDIT"
+        ) {
+          setMessage(
+            `${record.id} updated successfully.`
+          );
+        } else {
+          setMessage(
+            `${record.id} rejected successfully.`
+          );
+        }
+
+        await loadRecords(
+          true
+        );
+      } catch (err) {
+        console.error(
+          "Resolution failed:",
+          err
+        );
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Failed to resolve record"
+        );
+      } finally {
+        setActionId(null);
+      }
+    };
+
+  /* =========================================
+     Manual edit save
+     ========================================= */
+
+  const saveEdit = async (
+    record: ResolutionRecord
+  ) => {
+    const value =
+      editValue.trim();
+
+    if (!value) {
+      setError(
+        "Corrected value cannot be empty."
+      );
+
       return;
     }
 
-    setRecords((current) =>
-      current.map((record) =>
-        record.id === id
-          ? { ...record, suggestedValue: editValue.trim() }
-          : record
-      )
+    await runResolution(
+      record,
+      "EDIT",
+      value
     );
-
-    setEditingId(null);
-    setMessage(`Suggested value updated for ${id}.`);
   };
 
-  const resetRecords = () => {
-    setRecords(initialRecords);
-    setEditingId(null);
-    setEditValue("");
-    setMessage("Demo records have been reset.");
-  };
+  /* =========================================
+     Accept AI suggestion
+     ========================================= */
+
+  const acceptSuggestion =
+    async (
+      record: ResolutionRecord
+    ) => {
+      if (
+        !record.aiSuggestion
+      ) {
+        setError(
+          "No AI suggestion is available for this record. Use Edit to enter a correction manually."
+        );
+
+        return;
+      }
+
+      await runResolution(
+        record,
+        "APPROVE",
+        record.aiSuggestion
+      );
+    };
+
+  /* =========================================
+     Render
+     ========================================= */
 
   return (
     <div className="resolution-page">
+
       <div className="page-heading">
+
         <button
           className="secondary-button"
           type="button"
           onClick={onBack}
         >
-          <ArrowLeft size={16} />
+          <ArrowLeft
+            size={16}
+          />
           Back to Dashboard
         </button>
 
-        <h1>Resolution Centre</h1>
+        <h1>
+          Resolution Centre
+        </h1>
+
         <p>
-          Review proposed corrections before approving records for
-          further processing.
+          Review validation
+          failures, AI suggested
+          corrections and manual
+          updates before resolving
+          records.
         </p>
+
       </div>
+
+      {/* =====================================
+          AI banner
+          ===================================== */}
 
       <div className="resolution-banner">
+
         <div className="resolution-banner-icon">
-          <WandSparkles size={25} />
+          <WandSparkles
+            size={25}
+          />
         </div>
+
         <div>
-          <h2>Suggested Corrections</h2>
+
+          <h2>
+            Suggested Corrections
+          </h2>
+
           <p>
-            Review each suggestion carefully. Suggestions are illustrative
-            and have not been generated by an AI model.
+            Suggestions shown here
+            come from backend
+            FaultLog records and
+            their AI suggestion
+            fields.
           </p>
+
         </div>
+
       </div>
+
+      {/* =====================================
+          Summary
+          ===================================== */}
 
       <div className="resolution-summary">
+
         <div className="resolution-stat">
-          <span>Awaiting review</span>
-          <strong>{pendingCount}</strong>
-        </div>
-        <div className="resolution-stat">
-          <span>Accepted</span>
+
+          <span>
+            Awaiting review
+          </span>
+
           <strong>
-            {records.filter((record) => record.status === "Accepted").length}
+            {pendingCount}
           </strong>
+
         </div>
+
         <div className="resolution-stat">
-          <span>Rejected suggestions</span>
+
+          <span>
+            Accepted / edited
+          </span>
+
           <strong>
-            {records.filter((record) => record.status === "Rejected").length}
+            {acceptedCount}
           </strong>
+
         </div>
+
+        <div className="resolution-stat">
+
+          <span>
+            Rejected
+          </span>
+
+          <strong>
+            {rejectedCount}
+          </strong>
+
+        </div>
+
       </div>
 
+      {/* =====================================
+          Message
+          ===================================== */}
+
       {message && (
-        <div className="resolution-message" role="status">
+        <div
+          className="resolution-message"
+          role="status"
+        >
           {message}
         </div>
       )}
 
-      <div className="resolution-record-list">
-        {records.map((record) => (
-          <article className="resolution-card" key={record.id}>
-            <div className="resolution-card-header">
-              <div>
-                <span className="resolution-record-id">{record.id}</span>
-                <h3>{record.field}</h3>
-                <p>{record.file}</p>
-              </div>
+      {/* =====================================
+          Error
+          ===================================== */}
 
-              <span
-                className={`review-status ${record.status.toLowerCase()}`}
-              >
-                {record.status}
-              </span>
-            </div>
+      {error && (
+        <div className="rejection-note">
 
-            <div className="resolution-values">
-              <div className="resolution-value original">
-                <span>Original value</span>
-                <strong>{record.originalValue || "Empty"}</strong>
-              </div>
+          <AlertTriangle
+            size={18}
+          />
 
-              <div className="resolution-arrow">→</div>
+          <p>
+            {error}
+          </p>
 
-              <div className="resolution-value suggested">
-                <span>Suggested value</span>
+        </div>
+      )}
 
-                {editingId === record.id ? (
-                  <input
-                    className="resolution-edit-input"
-                    aria-label={`Edit suggested value for ${record.id}`}
-                    value={editValue}
-                    onChange={(event) => setEditValue(event.target.value)}
-                  />
-                ) : (
-                  <strong>{record.suggestedValue || "Empty"}</strong>
-                )}
-              </div>
-            </div>
-
-            <p className="resolution-reason">
-              <AlertTriangle size={16} />
-              {record.reason}
-            </p>
-
-            <div className="resolution-card-footer">
-              <span className="confidence-label">
-                Demo confidence: <strong>{record.confidence}%</strong>
-              </span>
-
-              <div className="resolution-actions">
-                {editingId === record.id ? (
-                  <>
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => {
-                        setEditingId(null);
-                        setEditValue("");
-                        setMessage("");
-                      }}
-                    >
-                      Cancel
-                    </button>
-
-                    <button
-                      className="resolution-button accept"
-                      type="button"
-                      onClick={() => saveEdit(record.id)}
-                    >
-                      Save edit
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      disabled={record.status !== "Pending"}
-                      onClick={() => startEditing(record)}
-                    >
-                      <Pencil size={15} />
-                      Edit
-                    </button>
-
-                    <button
-                      className="resolution-button reject"
-                      type="button"
-                      disabled={record.status !== "Pending"}
-                      onClick={() => updateStatus(record.id, "Rejected")}
-                    >
-                      <CircleX size={15} />
-                      Reject
-                    </button>
-
-                    <button
-                      className="resolution-button accept"
-                      type="button"
-                      disabled={record.status !== "Pending"}
-                      onClick={() => updateStatus(record.id, "Accepted")}
-                    >
-                      <CheckCircle2 size={15} />
-                      Accept
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          </article>
-        ))}
-      </div>
+      {/* =====================================
+          Refresh
+          ===================================== */}
 
       <div className="resolution-bottom-actions">
+
         <p>
-          <AlertTriangle size={16} />
-          Accepting a suggestion changes only this frontend demo state.
-          It does not update bank records or resubmit a file.
+          <Clock3
+            size={16}
+          />
+          Resolution data refreshes
+          automatically every 2
+          seconds.
         </p>
 
         <button
           className="secondary-button"
           type="button"
-          onClick={resetRecords}
+          onClick={() =>
+            loadRecords()
+          }
         >
-          <RotateCcw size={15} />
-          Reset demo
+          <RefreshCw
+            size={15}
+          />
+          Refresh
         </button>
+
       </div>
+
+      {/* =====================================
+          Loading
+          ===================================== */}
+
+      {loading &&
+        records.length ===
+          0 && (
+          <div className="resolution-message">
+            Loading resolution
+            records...
+          </div>
+        )}
+
+      {/* =====================================
+          Empty
+          ===================================== */}
+
+      {!loading &&
+        records.length ===
+          0 && (
+          <div className="resolution-message">
+            No validation issues
+            have been detected yet.
+          </div>
+        )}
+
+      {/* =====================================
+          Records
+          ===================================== */}
+
+      <div className="resolution-record-list">
+
+        {records.map(
+          (record) => {
+            const fileName =
+              record.file
+                ?.originalName ||
+              record.file
+                ?.fileName ||
+              "Unknown file";
+
+            const confidence =
+              formatConfidence(
+                record.aiConfidence
+              );
+
+            const isPending =
+              record.status ===
+              "PENDING";
+
+            const isBusy =
+              actionId ===
+              record.id;
+
+            return (
+              <article
+                className="resolution-card"
+                key={
+                  record.id
+                }
+              >
+
+                {/* Header */}
+
+                <div className="resolution-card-header">
+
+                  <div>
+
+                    <span className="resolution-record-id">
+                      {
+                        record.id
+                      }
+                    </span>
+
+                    <h3>
+                      {
+                        record.columnName
+                      }
+                    </h3>
+
+                    <p>
+                      {fileName}
+                      {" · "}
+                      Row{" "}
+                      {
+                        record.rowNumber
+                      }
+                    </p>
+
+                  </div>
+
+                  <span
+                    className={`review-status ${statusClass(
+                      record.status
+                    )}`}
+                  >
+                    {displayStatus(
+                      record.status
+                    )}
+                  </span>
+
+                </div>
+
+                {/* Values */}
+
+                <div className="resolution-values">
+
+                  <div className="resolution-value original">
+
+                    <span>
+                      Original value
+                    </span>
+
+                    <strong>
+                      {record.cellValue ||
+                        "Empty"}
+                    </strong>
+
+                  </div>
+
+                  <div className="resolution-arrow">
+                    →
+                  </div>
+
+                  <div className="resolution-value suggested">
+
+                    <span>
+                      {editingId ===
+                      record.id
+                        ? "Corrected value"
+                        : "AI suggested value"}
+                    </span>
+
+                    {editingId ===
+                    record.id ? (
+
+                      <input
+                        className="resolution-edit-input"
+                        aria-label={`Edit corrected value for ${record.id}`}
+                        value={
+                          editValue
+                        }
+                        onChange={(
+                          event
+                        ) =>
+                          setEditValue(
+                            event
+                              .target
+                              .value
+                          )
+                        }
+                        autoFocus
+                      />
+
+                    ) : (
+
+                      <strong>
+                        {record.aiSuggestion ||
+                          "No suggestion available"}
+                      </strong>
+
+                    )}
+
+                  </div>
+
+                </div>
+
+                {/* Validation reason */}
+
+                <p className="resolution-reason">
+
+                  <AlertTriangle
+                    size={16}
+                  />
+
+                  {
+                    record.errorMessage
+                  }
+
+                </p>
+
+                {/* AI explanation */}
+
+                {record.aiExplanation && (
+                  <p className="resolution-reason">
+
+                    <WandSparkles
+                      size={16}
+                    />
+
+                    {
+                      record.aiExplanation
+                    }
+
+                  </p>
+                )}
+
+                {/* Footer */}
+
+                <div className="resolution-card-footer">
+
+                  <span className="confidence-label">
+
+                    {confidence !==
+                    null ? (
+                      <>
+                        AI confidence:{" "}
+                        <strong>
+                          {
+                            confidence
+                          }
+                          %
+                        </strong>
+                      </>
+                    ) : (
+                      <>
+                        AI confidence:{" "}
+                        <strong>
+                          —
+                        </strong>
+                      </>
+                    )}
+
+                  </span>
+
+                  <div className="resolution-actions">
+
+                    {editingId ===
+                    record.id ? (
+                      <>
+
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={
+                            isBusy
+                          }
+                          onClick={
+                            cancelEditing
+                          }
+                        >
+                          Cancel
+                        </button>
+
+                        <button
+                          className="resolution-button accept"
+                          type="button"
+                          disabled={
+                            isBusy
+                          }
+                          onClick={() =>
+                            saveEdit(
+                              record
+                            )
+                          }
+                        >
+                          <CheckCircle2
+                            size={15}
+                          />
+
+                          {isBusy
+                            ? "Saving..."
+                            : "Save edit"}
+                        </button>
+
+                      </>
+                    ) : (
+                      <>
+
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={
+                            !isPending ||
+                            isBusy
+                          }
+                          onClick={() =>
+                            startEditing(
+                              record
+                            )
+                          }
+                        >
+                          <Pencil
+                            size={15}
+                          />
+                          Edit
+                        </button>
+
+                        <button
+                          className="resolution-button reject"
+                          type="button"
+                          disabled={
+                            !isPending ||
+                            isBusy
+                          }
+                          onClick={() =>
+                            runResolution(
+                              record,
+                              "REJECT"
+                            )
+                          }
+                        >
+                          <CircleX
+                            size={15}
+                          />
+
+                          {isBusy
+                            ? "Updating..."
+                            : "Reject"}
+                        </button>
+
+                        <button
+                          className="resolution-button accept"
+                          type="button"
+                          disabled={
+                            !isPending ||
+                            isBusy ||
+                            !record.aiSuggestion
+                          }
+                          onClick={() =>
+                            acceptSuggestion(
+                              record
+                            )
+                          }
+                        >
+                          <CheckCircle2
+                            size={15}
+                          />
+
+                          {isBusy
+                            ? "Updating..."
+                            : "Accept"}
+                        </button>
+
+                      </>
+                    )}
+
+                  </div>
+
+                </div>
+
+                {/* Already resolved value */}
+
+                {record.status !==
+                  "PENDING" &&
+                  record.resolvedValue && (
+                    <div className="resolution-message">
+
+                      Resolved value:{" "}
+                      <strong>
+                        {
+                          record.resolvedValue
+                        }
+                      </strong>
+
+                    </div>
+                  )}
+
+              </article>
+            );
+          }
+        )}
+
+      </div>
+
     </div>
   );
 }
