@@ -42,7 +42,7 @@ export class ProcessorService {
     500;
 
   /* =======================================================
-     MAIN PROCESSING ENTRY
+     MAIN FILE PROCESSOR
      ======================================================= */
 
   async processFile(
@@ -58,6 +58,10 @@ export class ProcessorService {
     );
 
     try {
+      /* ---------------------------------------------------
+         Check uploaded file
+         --------------------------------------------------- */
+
       if (
         !fs.existsSync(
           filePath
@@ -69,7 +73,7 @@ export class ProcessorService {
       }
 
       /* ---------------------------------------------------
-         Read file information from PostgreSQL
+         Get file metadata from DB
          --------------------------------------------------- */
 
       const fileRecord =
@@ -102,9 +106,16 @@ export class ProcessorService {
       const fileSizeBytes =
         fileStats.size;
 
-      /* ---------------------------------------------------
-         Mark PROCESSING
-         --------------------------------------------------- */
+      logger.info(
+        `[ProcessorService] File metadata | ` +
+          `file=${fileId} | ` +
+          `type=${fileType} | ` +
+          `size=${fileSizeBytes}`
+      );
+
+      /* ===================================================
+         MARK PROCESSING
+         =================================================== */
 
       await prisma.processingFile.update({
         where: {
@@ -142,9 +153,9 @@ export class ProcessorService {
         }
       );
 
-      /* ---------------------------------------------------
-         Stream + validate + load + ML batch analysis
-         --------------------------------------------------- */
+      /* ===================================================
+         STREAM FILE
+         =================================================== */
 
       const stats =
         await this.streamAndProcessFile(
@@ -154,24 +165,48 @@ export class ProcessorService {
           fileSizeBytes
         );
 
+      logger.info(
+        `[ProcessorService] CSV stream complete | ` +
+          `file=${fileId} | ` +
+          `processed=${stats.processedRows} | ` +
+          `valid=${stats.validRows} | ` +
+          `rejected=${stats.rejectedRows} | ` +
+          `batchAnomalies=${stats.anomalyCount}`
+      );
+
       /* ===================================================
-         FILE-WIDE ML CHECKS
+         FINISH LAYER 2 FILE SESSION
          =================================================== */
 
       /**
-       * Important:
+       * The Python anomaly service stores rows across
+       * different batches for this file.
        *
-       * The Python service stores a session across
-       * batches so it can detect patterns such as:
+       * Calling /finish allows it to detect:
        *
-       * rapid transactions across different batches
-       * near duplicates
-       * rate-series anomalies
+       * TXN_VELOCITY
+       * PAYMENT_BURST
+       * NEAR_DUPLICATE
+       * RATE_JUMP
+       * STALE_RATE
+       * INVERTED_SPREAD
+       * etc.
        */
+
+      logger.info(
+        `[ProcessorService] Calling ML /anomaly/finish | file=${fileId}`
+      );
+
       const finishResult =
         await mlClient.finishAnomalyFile(
           fileId
         );
+
+      logger.info(
+        `[ProcessorService] ML /finish returned | ` +
+          `file=${fileId} | ` +
+          `anomalies=${finishResult.count}`
+      );
 
       await this.saveAnomalyFlags(
         fileId,
@@ -179,9 +214,9 @@ export class ProcessorService {
         stats
       );
 
-      /* ---------------------------------------------------
-         Calculate real processing time
-         --------------------------------------------------- */
+      /* ===================================================
+         CALCULATE PROCESSING TIME
+         =================================================== */
 
       const completedAt =
         new Date();
@@ -191,18 +226,9 @@ export class ProcessorService {
         startedAt.getTime();
 
       /* ===================================================
-         FILE LEVEL ML CHECKS
+         BUILD FILE HISTORY FOR FILE-LEVEL ML
          =================================================== */
 
-      /**
-       * Give the model historical files of the
-       * same type so it can identify unusual:
-       *
-       * file sizes
-       * row counts
-       * rejection rates
-       * processing times
-       */
       const previousFiles =
         await prisma.processingFile.findMany({
           where: {
@@ -226,11 +252,16 @@ export class ProcessorService {
 
           select: {
             fileType: true,
+
             sizeBytes: true,
+
             totalRows: true,
+
             failedRows: true,
+
             actualDurationMs:
               true,
+
             predictedDurationMs:
               true,
           },
@@ -239,7 +270,9 @@ export class ProcessorService {
       const history:
         FileAnomalyFeatures[] =
         previousFiles.map(
-          (previous) => ({
+          (
+            previous
+          ) => ({
             file_type:
               previous.fileType,
 
@@ -270,37 +303,54 @@ export class ProcessorService {
           })
         );
 
+      /* ===================================================
+         FILE LEVEL ANOMALY DETECTION
+         =================================================== */
+
       const currentFileFeatures:
-        FileAnomalyFeatures = {
-        file_type:
-          fileType,
+        FileAnomalyFeatures =
+        {
+          file_type:
+            fileType,
 
-        size_bytes:
-          fileSizeBytes,
+          size_bytes:
+            fileSizeBytes,
 
-        total_records:
-          stats.processedRows,
+          total_records:
+            stats.processedRows,
 
-        rejected_records:
-          stats.rejectedRows,
+          rejected_records:
+            stats.rejectedRows,
 
-        actual_seconds:
-          actualDurationMs /
-          1000,
+          actual_seconds:
+            actualDurationMs /
+            1000,
 
-        predicted_seconds:
-          fileRecord.predictedDurationMs !=
-          null
-            ? fileRecord.predictedDurationMs /
-              1000
-            : undefined,
-      };
+          predicted_seconds:
+            fileRecord.predictedDurationMs !=
+            null
+              ? fileRecord.predictedDurationMs /
+                1000
+              : undefined,
+        };
+
+      logger.info(
+        `[ProcessorService] Calling ML /anomaly/file-level | ` +
+          `file=${fileId} | ` +
+          `history=${history.length}`
+      );
 
       const fileLevelResult =
         await mlClient.detectFileAnomalies(
           currentFileFeatures,
           history
         );
+
+      logger.info(
+        `[ProcessorService] ML /file-level returned | ` +
+          `file=${fileId} | ` +
+          `anomalies=${fileLevelResult.count}`
+      );
 
       await this.saveAnomalyFlags(
         fileId,
@@ -309,24 +359,25 @@ export class ProcessorService {
       );
 
       /* ===================================================
-         FINAL STATUS
+         FINAL FILE STATUS
          =================================================== */
 
       /**
-       * Anomalies do NOT reject files.
+       * Layer 2 anomalies DO NOT reject the file.
        *
-       * Only Layer 1 validation failures move
-       * the file to NEEDS_REVIEW.
+       * Only deterministic Layer 1 validation failures
+       * move it to NEEDS_REVIEW.
        */
+
       const finalStatus =
         stats.rejectedRows >
         0
           ? 'NEEDS_REVIEW'
           : 'COMPLETED';
 
-      /* ---------------------------------------------------
-         Save final file result
-         --------------------------------------------------- */
+      /* ===================================================
+         SAVE FINAL RESULT
+         =================================================== */
 
       await prisma.processingFile.update({
         where: {
@@ -392,7 +443,8 @@ export class ProcessorService {
           `processed=${stats.processedRows} | ` +
           `valid=${stats.validRows} | ` +
           `rejected=${stats.rejectedRows} | ` +
-          `anomalies=${stats.anomalyCount}`
+          `anomalies=${stats.anomalyCount} | ` +
+          `durationMs=${actualDurationMs}`
       );
     } catch (error) {
       const message =
@@ -408,8 +460,32 @@ export class ProcessorService {
         startedAt.getTime();
 
       logger.error(
-        `[ProcessorService] Failed | file=${fileId} | ${message}`
+        `[ProcessorService] FAILED | ` +
+          `file=${fileId} | ` +
+          `error=${message}`,
+        error
       );
+
+      /* ---------------------------------------------------
+         Best-effort ML session cleanup
+         --------------------------------------------------- */
+
+      try {
+        await mlClient.finishAnomalyFile(
+          fileId
+        );
+      } catch (
+        mlCleanupError
+      ) {
+        logger.warn(
+          `[ProcessorService] ML cleanup failed | file=${fileId}`,
+          mlCleanupError
+        );
+      }
+
+      /* ---------------------------------------------------
+         Mark file failed
+         --------------------------------------------------- */
 
       try {
         await prisma.processingFile.update({
@@ -453,7 +529,7 @@ export class ProcessorService {
   }
 
   /* =======================================================
-     STREAM FILE
+     STREAM CSV
      ======================================================= */
 
   private async streamAndProcessFile(
@@ -468,7 +544,8 @@ export class ProcessorService {
         reject
       ) => {
         const stats:
-          ProcessingStats = {
+          ProcessingStats =
+        {
           processedRows: 0,
           validRows: 0,
           rejectedRows: 0,
@@ -476,11 +553,13 @@ export class ProcessorService {
         };
 
         let batch:
-          CsvRecord[] = [];
+          CsvRecord[] =
+          [];
 
         /**
-         * Ensures batches from one file
-         * are processed sequentially.
+         * Batches for one file must run sequentially
+         * because the Python anomaly service keeps
+         * one stateful detector per file.
          */
         let processing =
           Promise.resolve();
@@ -505,6 +584,10 @@ export class ProcessorService {
                   ),
             })
           );
+
+        /* ---------------------------------------------------
+           CSV row
+           --------------------------------------------------- */
 
         csvStream.on(
           'data',
@@ -554,10 +637,10 @@ export class ProcessorService {
                   )
                   .catch(
                     (
-                      error
+                      processingError
                     ) => {
                       csvStream.destroy(
-                        error
+                        processingError
                       );
                     }
                   );
@@ -566,6 +649,10 @@ export class ProcessorService {
             }
           }
         );
+
+        /* ---------------------------------------------------
+           CSV complete
+           --------------------------------------------------- */
 
         csvStream.on(
           'end',
@@ -637,15 +724,29 @@ export class ProcessorService {
       > = [];
 
     /**
-     * Real CSV row numbers for the
-     * valid rows sent to ML.
+     * These correspond exactly with validRecords.
+     *
+     * They allow Python's internal row indexes
+     * to be mapped back to the original CSV rows.
      */
     const validRowNumbers:
-      number[] = [];
+      number[] =
+      [];
 
     const faultLogs:
       Prisma.FaultLogCreateManyInput[] =
       [];
+
+    logger.info(
+      `[ProcessorService] Processing batch | ` +
+        `file=${fileId} | ` +
+        `type=${fileType} | ` +
+        `batchRows=${records.length}`
+    );
+
+    /* =====================================================
+       LAYER 1 VALIDATION
+       ===================================================== */
 
     for (
       const record of
@@ -654,19 +755,13 @@ export class ProcessorService {
       stats.processedRows++;
 
       /**
-       * CSV line 1 is header.
+       * Line 1 = CSV header.
        *
-       * First data row:
-       * processedRows=1
-       * rowNumber=2
+       * First actual record therefore lives on CSV row 2.
        */
       const rowNumber =
         stats.processedRows +
         1;
-
-      /* ---------------------------------------------------
-         Layer 1 validation
-         --------------------------------------------------- */
 
       const validation =
         await validatorService.validateRecord(
@@ -674,7 +769,7 @@ export class ProcessorService {
         );
 
       /* ---------------------------------------------------
-         INVALID ROW
+         Invalid row
          --------------------------------------------------- */
 
       if (
@@ -683,7 +778,7 @@ export class ProcessorService {
         stats.rejectedRows++;
 
         logger.debug(
-          `[ProcessorService] Rejected | ` +
+          `[ProcessorService] Validation rejected | ` +
             `file=${fileId} | ` +
             `row=${rowNumber} | ` +
             `errors=${validation.errors.join(
@@ -723,14 +818,14 @@ export class ProcessorService {
         }
 
         /**
-         * Invalid rows are NOT sent
-         * to Layer 2 anomaly detection.
+         * Invalid records must not be passed
+         * to Layer 2.
          */
         continue;
       }
 
       /* ---------------------------------------------------
-         VALID ROW
+         Valid row
          --------------------------------------------------- */
 
       stats.validRows++;
@@ -744,9 +839,16 @@ export class ProcessorService {
       );
     }
 
-    /* ===================================================
-       SAVE VALIDATION FAILURES
-       =================================================== */
+    logger.info(
+      `[ProcessorService] Batch validated | ` +
+        `file=${fileId} | ` +
+        `valid=${validRecords.length} | ` +
+        `invalid=${records.length - validRecords.length}`
+    );
+
+    /* =====================================================
+       SAVE LAYER 1 VALIDATION FAILURES
+       ===================================================== */
 
     if (
       faultLogs.length >
@@ -758,50 +860,83 @@ export class ProcessorService {
       });
 
       logger.info(
-        `[ProcessorService] Saved ${faultLogs.length} fault logs | file=${fileId}`
+        `[ProcessorService] Saved ${faultLogs.length} validation faults | file=${fileId}`
       );
     }
-
-    /* ===================================================
-       LOAD VALID RECORDS
-       =================================================== */
 
     if (
-      validRecords.length >
+      validRecords.length ===
       0
     ) {
-      await loaderService.loadValidRecords(
-        fileId,
-        validRecords
+      logger.info(
+        `[ProcessorService] No valid rows for Layer 2 | file=${fileId}`
       );
+
+      return;
     }
 
-    /* ===================================================
+    /* =====================================================
        LAYER 2 ML ANOMALY DETECTION
-       =================================================== */
 
-    if (
-      validRecords.length >
-      0
-    ) {
-      const anomalyResult =
-        await mlClient.detectAnomalyBatch(
-          fileId,
-          fileType,
-          validRecords,
-          validRowNumbers
-        );
+       IMPORTANT:
+       This happens BEFORE loaderService.
 
-      await this.saveAnomalyFlags(
+       That means a DB FK/load failure cannot prevent
+       the uploaded records from reaching the ML service.
+       ===================================================== */
+
+    logger.info(
+      `[ProcessorService] Sending rows to ML /anomaly/detect-batch | ` +
+        `file=${fileId} | ` +
+        `type=${fileType} | ` +
+        `rows=${validRecords.length} | ` +
+        `firstRow=${validRowNumbers[0]} | ` +
+        `lastRow=${validRowNumbers[validRowNumbers.length - 1]}`
+    );
+
+    const anomalyResult =
+      await mlClient.detectAnomalyBatch(
         fileId,
-        anomalyResult.flags,
-        stats
+        fileType,
+        validRecords,
+        validRowNumbers
       );
-    }
+
+    logger.info(
+      `[ProcessorService] ML batch response | ` +
+        `file=${fileId} | ` +
+        `count=${anomalyResult.count} | ` +
+        `flags=${anomalyResult.flags.length}`
+    );
+
+    await this.saveAnomalyFlags(
+      fileId,
+      anomalyResult.flags,
+      stats
+    );
+
+    /* =====================================================
+       LOAD VALID ROWS
+
+       Only after Layer 2 has inspected them.
+       ===================================================== */
+
+    logger.info(
+      `[ProcessorService] Loading ${validRecords.length} valid rows | file=${fileId}`
+    );
+
+    await loaderService.loadValidRecords(
+      fileId,
+      validRecords
+    );
+
+    logger.info(
+      `[ProcessorService] Batch load complete | file=${fileId}`
+    );
   }
 
   /* =======================================================
-     SAVE ML ANOMALIES TO PRISMA
+     STORE ANOMALY FLAGS
      ======================================================= */
 
   private async saveAnomalyFlags(
@@ -815,6 +950,10 @@ export class ProcessorService {
       flags.length ===
       0
     ) {
+      logger.debug(
+        `[ProcessorService] No anomaly flags to save | file=${fileId}`
+      );
+
       return;
     }
 
@@ -858,12 +997,29 @@ export class ProcessorService {
       flags.length;
 
     logger.info(
-      `[ProcessorService] Saved ${flags.length} ML anomaly flags | file=${fileId}`
+      `[ProcessorService] Saved ML anomalies | ` +
+        `file=${fileId} | ` +
+        `count=${flags.length} | ` +
+        `total=${stats.anomalyCount}`
     );
+
+    for (
+      const flag of
+      flags
+    ) {
+      logger.info(
+        `[ProcessorService] ML anomaly | ` +
+          `file=${fileId} | ` +
+          `row=${flag.row_number ?? 'FILE'} | ` +
+          `type=${flag.anomaly_type} | ` +
+          `score=${flag.score} | ` +
+          `method=${flag.method}`
+      );
+    }
   }
 
   /* =======================================================
-     PROGRESS
+     UPDATE FILE PROGRESS
      ======================================================= */
 
   private async updateProgress(
@@ -877,19 +1033,21 @@ export class ProcessorService {
       0;
 
     if (
-      totalBytes > 0
+      totalBytes >
+      0
     ) {
       progress =
         Math.floor(
-          (bytesRead /
-            totalBytes) *
+          (
+            bytesRead /
+            totalBytes
+          ) *
             100
         );
     }
 
     /**
-     * 100 is reserved for
-     * final completion.
+     * Final 100% is reserved for final success.
      */
     progress =
       Math.min(

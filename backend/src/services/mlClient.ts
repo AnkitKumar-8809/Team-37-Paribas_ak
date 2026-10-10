@@ -1,18 +1,20 @@
 import { logger } from '../utils/logger';
 
 /* =========================================================
-   Old single-row anomaly contract
-   Kept for compatibility
+   SINGLE-ROW ANOMALY CONTRACT
+   Kept for backward compatibility
    ========================================================= */
 
 export interface AnomalyResult {
+  fileId?: string;
   isAnomaly: boolean;
   score: number;
+  reason?: string;
   explanation?: string;
 }
 
 /* =========================================================
-   Layer 2 anomaly contracts
+   LAYER 2 ANOMALY CONTRACTS
    ========================================================= */
 
 export interface AnomalyFlag {
@@ -54,40 +56,138 @@ export interface FileAnomalyFeatures {
 }
 
 /* =========================================================
-   Other ML contracts
+   PROCESSING TIME CONTRACT
    ========================================================= */
 
 export interface PredictionResult {
   estimatedSeconds: number;
-}
 
-export interface SuggestionResult {
-  suggestedValue: string | null;
-  confidence: number;
-  explanation?: string;
+  unit?: string;
+
+  method?: string;
 }
 
 /* =========================================================
-   ML Client
+   AI SUGGESTION CONTRACT
+   ========================================================= */
+
+export interface SuggestionResult {
+  suggestedValue: string | null;
+
+  confidence: number;
+
+  explanation?: string;
+
+  source?: string;
+}
+
+/* =========================================================
+   CUSTOM ML ERROR
+   ========================================================= */
+
+export class MLServiceError extends Error {
+  readonly endpoint: string;
+
+  readonly status?: number;
+
+  readonly responseBody?: string;
+
+  constructor(
+    message: string,
+    endpoint: string,
+    status?: number,
+    responseBody?: string
+  ) {
+    super(message);
+
+    this.name =
+      'MLServiceError';
+
+    this.endpoint =
+      endpoint;
+
+    this.status =
+      status;
+
+    this.responseBody =
+      responseBody;
+  }
+}
+
+/* =========================================================
+   ML CLIENT
    ========================================================= */
 
 export class MLClient {
   private readonly baseUrl: string;
 
   /**
-   * Batch Isolation Forest / SHAP checks may
-   * take longer than the old single-record call.
+   * Isolation Forest + SHAP can take longer
+   * than simple validation calls.
    */
-  private readonly timeoutMs = 30000;
+  private readonly timeoutMs =
+    30000;
 
   constructor() {
-    this.baseUrl =
+    const configuredUrl =
       process.env.ML_SERVICE_URL ||
       'http://localhost:8000';
+
+    /**
+     * Remove trailing slash so:
+     *
+     * http://localhost:8000/
+     *
+     * does not become:
+     *
+     * http://localhost:8000//anomaly/...
+     */
+    this.baseUrl =
+      configuredUrl.replace(
+        /\/+$/,
+        ''
+      );
+
+    logger.info(
+      `[MLClient] ML service URL=${this.baseUrl}`
+    );
   }
 
   /* =======================================================
-     OLD SINGLE ROW ENDPOINT
+     HEALTH CHECK
+     ======================================================= */
+
+  async healthCheck(): Promise<boolean> {
+    const endpoint =
+      '/health';
+
+    try {
+      const response =
+        await this.get<{
+          status: string;
+        }>(
+          endpoint
+        );
+
+      return (
+        response.status ===
+        'ok'
+      );
+    } catch (error) {
+      logger.error(
+        '[MLClient] ML health check failed',
+        error
+      );
+
+      return false;
+    }
+  }
+
+  /* =======================================================
+     SINGLE-ROW ANOMALY CHECK
+
+     This is no longer used by the new processor,
+     but keep it because Python still supports it.
      ======================================================= */
 
   async checkAnomaly(
@@ -98,45 +198,50 @@ export class MLClient {
     >,
     fileType?: string
   ): Promise<AnomalyResult> {
-    try {
-      logger.debug(
-        `[MLClient] Checking single anomaly | file=${fileId}`
-      );
+    const endpoint =
+      '/anomaly/detect';
 
-      return await this.post<AnomalyResult>(
-        '/anomaly/detect',
-        {
-          fileId,
-          features,
-          fileType,
-        }
-      );
-    } catch (error) {
-      logger.warn(
-        `[MLClient] Single anomaly service unavailable | file=${fileId}`,
-        error
-      );
+    logger.debug(
+      `[MLClient] Single anomaly request | ` +
+        `file=${fileId} | ` +
+        `type=${fileType ?? 'auto'}`
+    );
 
-      return {
-        isAnomaly: false,
-        score: 0,
-      };
-    }
+    return this.post<AnomalyResult>(
+      endpoint,
+      {
+        fileId,
+        features,
+        fileType,
+      }
+    );
   }
 
   /* =======================================================
      BATCH ANOMALY DETECTION
+
+     Python:
+     POST /anomaly/detect-batch
      ======================================================= */
 
   async detectAnomalyBatch(
     fileId: string,
     fileType: string,
     rows: Array<
-      Record<string, unknown>
+      Record<
+        string,
+        unknown
+      >
     >,
     rowNumbers: number[]
   ): Promise<AnomalyFlagsResponse> {
-    if (rows.length === 0) {
+    const endpoint =
+      '/anomaly/detect-batch';
+
+    if (
+      rows.length ===
+      0
+    ) {
       return {
         fileId,
         count: 0,
@@ -144,101 +249,172 @@ export class MLClient {
       };
     }
 
+    if (
+      rowNumbers.length !==
+      rows.length
+    ) {
+      throw new Error(
+        `ML row mapping mismatch. ` +
+          `rows=${rows.length}, ` +
+          `rowNumbers=${rowNumbers.length}`
+      );
+    }
+
+    logger.info(
+      `[MLClient] POST ${endpoint} | ` +
+        `file=${fileId} | ` +
+        `type=${fileType} | ` +
+        `rows=${rows.length}`
+    );
+
     try {
-      logger.debug(
-        `[MLClient] Batch anomaly detection | file=${fileId} | rows=${rows.length}`
+      const response =
+        await this.post<AnomalyFlagsResponse>(
+          endpoint,
+          {
+            fileId,
+            fileType,
+            rows,
+            rowNumbers,
+          }
+        );
+
+      logger.info(
+        `[MLClient] Batch anomaly success | ` +
+          `file=${fileId} | ` +
+          `count=${response.count}`
       );
 
-      return await this.post<AnomalyFlagsResponse>(
-        '/anomaly/detect-batch',
-        {
-          fileId,
-          fileType,
-          rows,
-          rowNumbers,
-        }
-      );
+      return response;
     } catch (error) {
-      logger.warn(
-        `[MLClient] Batch anomaly detection unavailable | file=${fileId}`,
+      /**
+       * IMPORTANT:
+       *
+       * Do NOT return:
+       *
+       * {
+       *   count: 0,
+       *   flags: []
+       * }
+       *
+       * here.
+       *
+       * That would make an ML failure look
+       * like the model found no anomalies.
+       */
+      logger.error(
+        `[MLClient] Batch anomaly detection FAILED | ` +
+          `file=${fileId} | ` +
+          `type=${fileType}`,
         error
       );
 
-      /**
-       * ML failure must never stop the
-       * normal ingestion pipeline.
-       */
-      return {
-        fileId,
-        count: 0,
-        flags: [],
-      };
+      throw error;
     }
   }
 
   /* =======================================================
-     FINISH FILE-WIDE ANOMALY ANALYSIS
+     FINISH FILE SESSION
+
+     Python keeps state for multiple batches.
+
+     This detects patterns such as:
+     - TXN_VELOCITY
+     - PAYMENT_BURST
+     - NEAR_DUPLICATE
+     - RATE_JUMP
+     - STALE_RATE
      ======================================================= */
 
   async finishAnomalyFile(
     fileId: string
   ): Promise<AnomalyFlagsResponse> {
+    const endpoint =
+      '/anomaly/finish';
+
+    logger.info(
+      `[MLClient] POST ${endpoint} | file=${fileId}`
+    );
+
     try {
-      logger.debug(
-        `[MLClient] Finishing anomaly analysis | file=${fileId}`
+      const response =
+        await this.post<AnomalyFlagsResponse>(
+          endpoint,
+          {
+            fileId,
+          }
+        );
+
+      logger.info(
+        `[MLClient] Finish anomaly success | ` +
+          `file=${fileId} | ` +
+          `count=${response.count}`
       );
 
-      return await this.post<AnomalyFlagsResponse>(
-        '/anomaly/finish',
-        {
-          fileId,
-        }
-      );
+      return response;
     } catch (error) {
-      logger.warn(
-        `[MLClient] File-wide anomaly detection unavailable | file=${fileId}`,
+      logger.error(
+        `[MLClient] Finish anomaly detection FAILED | file=${fileId}`,
         error
       );
 
-      return {
-        fileId,
-        count: 0,
-        flags: [],
-      };
+      throw error;
     }
   }
 
   /* =======================================================
-     FILE LEVEL ANOMALY DETECTION
+     FILE-LEVEL ANOMALIES
+
+     Detects:
+     - FILE_SIZE_UNUSUAL
+     - RECORD_COUNT_UNUSUAL
+     - REJECTION_RATE_HIGH
+     - PROCESSING_TIME_MISS
      ======================================================= */
 
   async detectFileAnomalies(
-    features: FileAnomalyFeatures,
+    features:
+      FileAnomalyFeatures,
+
     history:
-      FileAnomalyFeatures[] = []
+      FileAnomalyFeatures[] =
+      []
   ): Promise<AnomalyFlagsResponse> {
+    const endpoint =
+      '/anomaly/file-level';
+
+    logger.info(
+      `[MLClient] POST ${endpoint} | ` +
+        `type=${features.file_type} | ` +
+        `records=${features.total_records ?? 0} | ` +
+        `history=${history.length}`
+    );
+
     try {
-      logger.debug(
-        `[MLClient] File-level anomaly detection | type=${features.file_type}`
+      const response =
+        await this.post<AnomalyFlagsResponse>(
+          endpoint,
+          {
+            features,
+            history,
+          }
+        );
+
+      logger.info(
+        `[MLClient] File-level anomaly success | ` +
+          `type=${features.file_type} | ` +
+          `count=${response.count}`
       );
 
-      return await this.post<AnomalyFlagsResponse>(
-        '/anomaly/file-level',
-        {
-          features,
-          history,
-        }
-      );
+      return response;
     } catch (error) {
-      logger.warn(
-        '[MLClient] File-level anomaly detection unavailable',
+      logger.error(
+        `[MLClient] File-level anomaly detection FAILED | ` +
+          `type=${features.file_type}`,
         error
       );
 
-      return {
-        count: 0,
-        flags: [],
-      };
+      throw error;
     }
   }
 
@@ -248,29 +424,57 @@ export class MLClient {
 
   async predictProcessingTime(
     fileSizeMb: number,
-    rowCount: number
+    rowCount: number,
+    fileType?: string,
+    sizeBytes?: number,
+    concurrency = 1
   ): Promise<number> {
+    const endpoint =
+      '/prediction/predict-time';
+
     try {
       const response =
         await this.post<PredictionResult>(
-          '/prediction/predict-time',
+          endpoint,
           {
-            fileSizeMb,
+            fileType,
+
             rowCount,
+
+            fileSizeMb,
+
+            sizeBytes,
+
+            concurrency,
           }
         );
 
-      return response.estimatedSeconds;
+      logger.info(
+        `[MLClient] ETA prediction | ` +
+          `type=${fileType ?? 'unknown'} | ` +
+          `rows=${rowCount} | ` +
+          `seconds=${response.estimatedSeconds} | ` +
+          `method=${response.method ?? 'unknown'}`
+      );
+
+      return (
+        response.estimatedSeconds
+      );
     } catch (error) {
+      /**
+       * ETA failure should not stop ingestion,
+       * so prediction is allowed to fall back.
+       */
       logger.warn(
-        '[MLClient] Processing-time prediction unavailable',
+        '[MLClient] Processing-time prediction unavailable. Using fallback.',
         error
       );
 
       return Math.max(
         1,
         Math.ceil(
-          rowCount / 500
+          rowCount /
+            500
         )
       );
     }
@@ -288,30 +492,53 @@ export class MLClient {
       unknown
     > = {}
   ): Promise<SuggestionResult> {
+    const endpoint =
+      '/suggestions/suggest-fix';
+
     try {
-      return await this.post<SuggestionResult>(
-        '/suggestions/suggest-fix',
-        {
-          fieldName,
-          originalValue,
-          context,
-        }
+      const response =
+        await this.post<SuggestionResult>(
+          endpoint,
+          {
+            fieldName,
+            originalValue,
+            context,
+          }
+        );
+
+      logger.debug(
+        `[MLClient] Suggestion success | ` +
+          `field=${fieldName} | ` +
+          `confidence=${response.confidence}`
       );
+
+      return response;
     } catch (error) {
+      /**
+       * Suggestions are optional.
+       * A failed suggestion must not crash
+       * the ingestion pipeline.
+       */
       logger.warn(
         `[MLClient] Suggestion service unavailable | field=${fieldName}`,
         error
       );
 
       return {
-        suggestedValue: null,
-        confidence: 0,
+        suggestedValue:
+          null,
+
+        confidence:
+          0,
+
+        explanation:
+          'ML suggestion service unavailable',
       };
     }
   }
 
   /* =======================================================
-     HTTP HELPER
+     POST HELPER
      ======================================================= */
 
   private async post<T>(
@@ -321,20 +548,34 @@ export class MLClient {
       unknown
     >
   ): Promise<T> {
+    const url =
+      `${this.baseUrl}${endpoint}`;
+
     const controller =
       new AbortController();
 
     const timeout =
-      setTimeout(() => {
-        controller.abort();
-      }, this.timeoutMs);
+      setTimeout(
+        () => {
+          controller.abort();
+        },
+        this.timeoutMs
+      );
+
+    const startedAt =
+      Date.now();
 
     try {
+      logger.debug(
+        `[MLClient] Request → ${url}`
+      );
+
       const response =
         await fetch(
-          `${this.baseUrl}${endpoint}`,
+          url,
           {
-            method: 'POST',
+            method:
+              'POST',
 
             headers: {
               'Content-Type':
@@ -351,18 +592,203 @@ export class MLClient {
           }
         );
 
-      if (!response.ok) {
-        const message =
-          await response.text();
+      const elapsedMs =
+        Date.now() -
+        startedAt;
 
-        throw new Error(
-          `ML service returned ${response.status} ${response.statusText}: ${message}`
+      /**
+       * Read as text first.
+       *
+       * This lets us show Python/FastAPI
+       * validation errors instead of hiding
+       * the useful response body.
+       */
+      const responseText =
+        await response.text();
+
+      if (
+        !response.ok
+      ) {
+        logger.error(
+          `[MLClient] HTTP ERROR | ` +
+            `endpoint=${endpoint} | ` +
+            `status=${response.status} | ` +
+            `durationMs=${elapsedMs} | ` +
+            `body=${responseText}`
+        );
+
+        throw new MLServiceError(
+          `ML service returned ` +
+            `${response.status} ${response.statusText}. ` +
+            `Response: ${responseText}`,
+          endpoint,
+          response.status,
+          responseText
         );
       }
 
-      return (
-        await response.json()
+      logger.debug(
+        `[MLClient] Response ← ${endpoint} | ` +
+          `status=${response.status} | ` +
+          `durationMs=${elapsedMs}`
+      );
+
+      if (
+        !responseText
+      ) {
+        throw new MLServiceError(
+          `ML service returned an empty response for ${endpoint}`,
+          endpoint,
+          response.status
+        );
+      }
+
+      try {
+        return JSON.parse(
+          responseText
+        ) as T;
+      } catch (parseError) {
+        throw new MLServiceError(
+          `ML service returned invalid JSON for ${endpoint}. ` +
+            `Response: ${responseText}`,
+          endpoint,
+          response.status,
+          responseText
+        );
+      }
+    } catch (error) {
+      if (
+        error instanceof
+        MLServiceError
+      ) {
+        throw error;
+      }
+
+      if (
+        error instanceof Error &&
+        error.name ===
+          'AbortError'
+      ) {
+        throw new MLServiceError(
+          `ML request timed out after ${this.timeoutMs}ms: ${endpoint}`,
+          endpoint
+        );
+      }
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(
+              error
+            );
+
+      throw new MLServiceError(
+        `Unable to reach ML service at ${url}: ${message}`,
+        endpoint
+      );
+    } finally {
+      clearTimeout(
+        timeout
+      );
+    }
+  }
+
+  /* =======================================================
+     GET HELPER
+     ======================================================= */
+
+  private async get<T>(
+    endpoint: string
+  ): Promise<T> {
+    const url =
+      `${this.baseUrl}${endpoint}`;
+
+    const controller =
+      new AbortController();
+
+    const timeout =
+      setTimeout(
+        () => {
+          controller.abort();
+        },
+        this.timeoutMs
+      );
+
+    try {
+      const response =
+        await fetch(
+          url,
+          {
+            method:
+              'GET',
+
+            headers: {
+              Accept:
+                'application/json',
+            },
+
+            signal:
+              controller.signal,
+          }
+        );
+
+      const responseText =
+        await response.text();
+
+      if (
+        !response.ok
+      ) {
+        throw new MLServiceError(
+          `ML service returned ${response.status} ${response.statusText}: ${responseText}`,
+          endpoint,
+          response.status,
+          responseText
+        );
+      }
+
+      if (
+        !responseText
+      ) {
+        throw new MLServiceError(
+          `ML service returned an empty response for ${endpoint}`,
+          endpoint,
+          response.status
+        );
+      }
+
+      return JSON.parse(
+        responseText
       ) as T;
+    } catch (error) {
+      if (
+        error instanceof
+        MLServiceError
+      ) {
+        throw error;
+      }
+
+      if (
+        error instanceof Error &&
+        error.name ===
+          'AbortError'
+      ) {
+        throw new MLServiceError(
+          `ML request timed out after ${this.timeoutMs}ms: ${endpoint}`,
+          endpoint
+        );
+      }
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(
+              error
+            );
+
+      throw new MLServiceError(
+        `Unable to reach ML service at ${url}: ${message}`,
+        endpoint
+      );
     } finally {
       clearTimeout(
         timeout

@@ -3,6 +3,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+const fileWatcher_1 = require("./watchers/fileWatcher");
+const dashboard_1 = __importDefault(require("./routes/dashboard"));
+const resolutions_1 = __importDefault(require("./routes/resolutions"));
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const dotenv_1 = __importDefault(require("dotenv"));
@@ -31,6 +34,7 @@ app.use(express_1.default.urlencoded({ extended: true }));
 (0, socket_1.initSocket)(server);
 // Start file worker pool
 fileWorker_1.fileWorker.start();
+(0, fileWatcher_1.startFileWatcher)();
 // Health check
 app.get('/health', (_req, res) => {
     res.status(200).json({
@@ -41,6 +45,8 @@ app.get('/health', (_req, res) => {
 });
 // API routes
 app.use('/api/files', files_1.default);
+app.use('/api/dashboard', dashboard_1.default);
+app.use('/api/resolutions', resolutions_1.default);
 // 404
 app.use((_req, res) => {
     res.status(404).json({
